@@ -1,0 +1,30 @@
+# ── Môi trường ảo Python ─────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Bí mật cá nhân ───────────────────────────────────────────
+.env
+
+# ── Cache Python ─────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Kết quả & file tạm do chương trình tự sinh ra ────────────
+output/
+work/
+
+# ── Sinh ra khi đóng gói .exe (PyInstaller) — CI tự tạo lại mỗi lần build ──
+build/
+dist/
+ffmpeg_bin/
+playwright_browsers/
+*.zip
+!requirements.txt
+
+# ── File hệ điều hành / IDE ──────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

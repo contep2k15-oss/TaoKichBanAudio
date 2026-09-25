@@ -1,0 +1,75 @@
+name: Build Windows .exe
+
+# Tự động chạy khi đẩy một tag phiên bản (vd v1.0.0) -> build xong tự đăng lên tab Releases.
+# Cũng có thể chạy TAY qua tab Actions -> "Run workflow" (không cần tag) để thử nghiệm quy trình build;
+# kết quả khi đó nằm ở mục "Artifacts" của lần chạy thay vì Releases.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # cần quyền ghi để tự tạo Release khi chạy vì tag
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cài Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Tạo icon app
+        run: python gen_icon.py
+
+      - name: Tải Chromium cho Playwright (đóng gói sẵn, người dùng cuối không cần tự cài)
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\playwright_browsers
+        run: python -m playwright install chromium
+
+      - name: Tải FFmpeg (đóng gói sẵn, người dùng cuối không cần tự cài)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ffmpeg_bin | Out-Null
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract
+          $bin = Get-ChildItem -Path ffmpeg_extract -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1 | Split-Path -Parent
+          Copy-Item "$bin\ffmpeg.exe" ffmpeg_bin\
+          Copy-Item "$bin\ffprobe.exe" ffmpeg_bin\
+          Remove-Item ffmpeg.zip, ffmpeg_extract -Recurse -Force
+
+      - name: Đóng gói bằng PyInstaller
+        run: pyinstaller --noconfirm --clean silent_video_voiceover_tool.spec
+
+      - name: Thêm .env.example vào bản đóng gói
+        shell: pwsh
+        run: Copy-Item .env.example dist\SilentVideoVoiceoverCreator\.env.example
+
+      - name: Nén thành file .zip
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          if ($ver -eq "") { $ver = "dev-$(Get-Date -Format yyyyMMdd-HHmm)" }
+          Compress-Archive -Path dist\SilentVideoVoiceoverCreator\* -DestinationPath "SilentVideoVoiceoverCreator-$ver-win64.zip"
+          echo "ZIP_NAME=SilentVideoVoiceoverCreator-$ver-win64.zip" >> $env:GITHUB_ENV
+
+      - name: Tải lên Artifacts (mọi lần chạy, kể cả chạy tay không có tag)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 14
+
+      - name: Tự đăng lên Releases (chỉ khi chạy vì đẩy tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
