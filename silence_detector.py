@@ -34,8 +34,12 @@ def detect_silences(video: Path, *, has_audio: bool, min_silence_sec: float = 0.
         log.info("Video không có track âm thanh → bỏ qua phát hiện khoảng lặng.")
         return []
 
-    cmd = ["ffmpeg", "-nostdin", "-i", str(video), "-af", f"silencedetect=noise={noise_db}dB:d={min_silence_sec}",
-           "-f", "null", "-"]
+    # `-vn`: BẮT BUỘC — không có cờ này, FFmpeg vẫn âm thầm GIẢI MÃ TOÀN BỘ luồng video (dù output là "null"
+    # và ta chỉ cần nghe audio), vì mặc định "-f null -" mux mọi stream có sẵn. Với video 4K dài, việc giải
+    # mã video vô ích này có thể khiến bước quét khoảng lặng (chỉ cần đọc audio) chậm hơn hàng chục lần,
+    # trông như bị "treo" dù thực ra vẫn đang chạy — chỉ là cực kỳ chậm một cách không cần thiết.
+    cmd = ["ffmpeg", "-nostdin", "-vn", "-i", str(video), "-af",
+           f"silencedetect=noise={noise_db}dB:d={min_silence_sec}", "-f", "null", "-"]
     log.info("Quét khoảng lặng (streaming, noise=%.0fdB, min=%.2fs)...", noise_db, min_silence_sec)
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0  # type: ignore[attr-defined]
     try:
