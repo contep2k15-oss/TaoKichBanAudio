@@ -31,6 +31,13 @@ datas += collect_data_files("streamlit")          # giao diện tĩnh (JS/CSS) c
 datas += collect_data_files("playwright")         # driver (Node.js runtime) của Playwright — KHÔNG phải trình duyệt
 datas += copy_metadata("streamlit")               # streamlit tự kiểm tra version qua importlib.metadata lúc chạy
 datas += copy_metadata("playwright")
+# Metadata các gói còn lại — để error_report.py đọc được phiên bản qua importlib.metadata trong bản .exe
+# (bọc try/except: thiếu metadata một gói KHÔNG được làm hỏng cả quá trình build).
+for _dist in ("pywebview", "pydub", "edge-tts", "opencv-python", "yt-dlp", "google-genai"):
+    try:
+        datas += copy_metadata(_dist)
+    except Exception as _e:  # noqa: BLE001
+        print(f"[spec] bỏ qua metadata của {_dist}: {_e}")
 
 # Trình duyệt Chromium thật (do `playwright install chromium` tải về, KHÔNG nằm trong gói pip `playwright`).
 # Workflow GitHub Actions (.github/workflows/build.yml) chạy `playwright install chromium` rồi copy thư mục đó
@@ -51,6 +58,7 @@ if os.path.isdir(_bundled_ffmpeg):
 hiddenimports = (
     collect_submodules("streamlit")
     + collect_submodules("playwright")
+    + collect_submodules("yt_dlp")
     + [
         "cv2", "numpy", "pydub", "pydub.silence", "pydub.generators",
         "edge_tts", "httpx", "google.genai", "google.genai.types",

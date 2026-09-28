@@ -115,3 +115,30 @@ assets/                              # icon đã tạo
   bản `.exe` đã đóng gói hoàn chỉnh, xem log build) — nhưng **cửa sổ pywebview thật trên Windows và luồng
   build .exe đầy đủ qua GitHub Actions chưa được chạy thử trên Windows thật**, vì môi trường phát triển dự
   án này không có Windows. Nếu build lỗi ở bước nào, xem log chi tiết ở tab Actions và báo lại.
+
+---
+
+## Nhập link YouTube (Gemini Web xem trực tiếp, không cần trích frame)
+
+Mục ② "Chọn video" → chọn **🔗 Nhập link YouTube** (chỉ dùng được khi Engine = Gemini Web).
+
+- Tool gửi link cho Gemini Web để nó **tự xem video và viết kịch bản cho toàn bộ video trong 1 lần**, đồng thời
+  **tải video về máy song song** (cần cho bước ghép giọng đọc/xuất video cuối).
+- **Kịch bản được lưu ra đĩa ngay khi nhận** (`work/youtube_script.json`). Nếu app bị đóng/sập giữa chừng, mở lại
+  và bấm chạy đúng nút cũ: **không tải lại, không hỏi lại Gemini** — chỉ làm tiếp phần còn dở.
+- **Chất lượng video tải về** (mặc định **1080p**): tool chỉ cần video để ghép tiếng, KHÔNG cần 4K. Bản 4K trên
+  YouTube thường là codec AV1 — giải mã bằng phần mềm rất chậm (đã đo thực tế: video 19 phút 4K mất ~40 phút
+  chỉ để quét khoảng lặng, và 28+ phút chưa xong 1 chunk trích frame). 1080p H.264 nhanh gấp nhiều lần.
+  Đổi chất lượng → tự tải lại bản mới (file đặt tên theo độ cao, vd `youtube_source_1080p.mp4`); kịch bản đã
+  lưu cho cùng link vẫn dùng lại được.
+- Không dùng chung được với "Chỉ giữ cảnh hay" (mốc thời gian kịch bản sẽ lệch sau khi video bị cắt).
+- Lưu ý pháp lý: tải video YouTube không thuộc quyền của bạn có thể không đúng Điều khoản dịch vụ của YouTube.
+
+## Khi có sự cố: báo cáo chẩn đoán
+
+- Lỗi xảy ra → app tự hiện **khối "📋 Báo cáo lỗi"** (có nút copy ở góc phải khối) và lưu file
+  `work/error_report_*.txt`. Copy nguyên khối, dán vào chat.
+- Thấy chạy lâu/lạ mà chưa báo lỗi? Mục ④ → mở "🩺 Đang chạy lâu…" → bấm **Tạo báo cáo chẩn đoán** (dùng được
+  bất cứ lúc nào, kể cả khi đang chạy dở, không cần chờ lỗi).
+- Khi trích frame, log hiện tiến độ + thời gian còn lại (`Trích frame 24/96 — 5.3s/khung, còn ~6.4 phút`) —
+  nếu thấy con số này quá lớn, nguyên nhân thường là video độ phân giải/codec nặng: chọn nguồn 1080p H.264.

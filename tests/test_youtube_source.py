@@ -5,7 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import Config  # noqa: E402
-from youtube_source import build_youtube_prompt, download_youtube_video, is_youtube_url  # noqa: E402
+from youtube_source import (build_youtube_prompt, download_youtube_video, format_selector, is_youtube_url,  # noqa: E402
+                            local_video_path)
 
 
 def check(name, cond):
@@ -32,6 +33,29 @@ check("có chỉ dẫn ngôi kể đã cấu hình", "Tôi" in p)
 check("có chỉ dẫn phong cách hài hước", "hài hước" in p.lower())
 check("có định dạng JSON mẫu đúng schema dùng chung với script_generator", '"start_time"' in p and '"tone"' in p)
 check("có yêu cầu định dạng HH:MM:SS.mmm rõ ràng", "HH:MM:SS.mmm" in p)
+
+# ── format_selector / local_video_path: chống lỗi "tải 4K AV1 giải mã cực chậm" ──
+f1080 = format_selector(1080)
+check("chuỗi format giới hạn độ cao theo tham số", "height<=1080" in f1080 and "height<=720" not in f1080)
+check("ƯU TIÊN codec H.264 (avc1) — giải mã nhanh, không phải AV1", f1080.index("avc1") < f1080.index("/bv*[height<=1080][ext=mp4]"))
+check("có nhánh dự phòng cuối cùng (b) để không thất bại khi thiếu định dạng ưa thích", f1080.endswith("/b"))
+check("độ cao khác → chuỗi khác tương ứng", "height<=720" in format_selector(720))
+check("mọi nhánh đều bị giới hạn độ cao (trừ dự phòng cuối cùng)",
+      all("height<=" in part for part in f1080.split("/")[:-1]))
+check("tên file cache theo độ cao", local_video_path(Path("/w"), 1080).name == "youtube_source_1080p.mp4")
+check("độ cao khác → tên file khác (không dùng nhầm bản cũ)",
+      local_video_path(Path("/w"), 720) != local_video_path(Path("/w"), 1080))
+
+# ── Config validation ──
+for bad in (0, 100, 5000):
+    try:
+        Config(video_path=None, output_dir="/tmp/yh", youtube_url="https://youtu.be/abc", youtube_max_height=bad)
+        raise AssertionError(f"youtube_max_height={bad} phải bị từ chối")
+    except ValueError:
+        pass
+print("  ✓ youtube_max_height ngoài [144, 4320] bị từ chối")
+check("youtube_max_height=1080 hợp lệ",
+      Config(video_path=None, output_dir="/tmp/yh2", youtube_url="https://youtu.be/abc", youtube_max_height=1080).youtube_max_height == 1080)
 
 # ── download_youtube_video: thử tải thật 1 video công khai rất ngắn ──
 import tempfile

@@ -229,8 +229,8 @@ def _ensure_tts_and_assemble(cfg: Config, chunk: MacroChunk, checkpoint: Pipelin
 
 
 def _distribute_segments_to_chunks(all_segments: list[ScriptSegment], chunks: list[MacroChunk],
-                                   checkpoint: PipelineCheckpoint, cfg: Config, *, source_label: str
-                                   ) -> list[list[ScriptSegment]]:
+                                   checkpoint: PipelineCheckpoint, cfg: Config, *, source_label: str,
+                                   invalidate_downstream: bool = False) -> list[list[ScriptSegment]]:
     """Dùng chung cho MỌI trường hợp đã có sẵn kịch bản ĐẦY ĐỦ cho toàn video (mốc thời gian TUYỆT ĐỐI) mà
     KHÔNG cần gọi Gemini theo từng chunk nữa — hiện có 2 nguồn: `--script-file` (người dùng tự viết) và
     kịch bản lấy qua link YouTube (`youtube_source.py`). Chia đúng theo `chunk.start_sec/end_sec`, kiểm
@@ -251,6 +251,10 @@ def _distribute_segments_to_chunks(all_segments: list[ScriptSegment], chunks: li
         else:
             fixed = script_generator.validate_and_fix(segs, cfg, chunk.end_sec, None, auto_shorten=False,
                                                        min_time=chunk.start_sec)
+        if invalidate_downstream:
+            # kịch bản đang bị THAY MỚI → giọng đọc/audio đã ghép từ kịch bản CŨ (nếu có) không còn khớp nữa,
+            # phải bỏ để làm lại, tránh video cuối lẫn lộn giữa 2 phiên bản kịch bản
+            checkpoint.invalidate_from(chunk.index, Stage.TTS)
         checkpoint.save(chunk.index, Stage.EXTRACTED, {"samples": [], "source": source_label})
         checkpoint.save(chunk.index, Stage.SCRIPT, {"segments": [_segment_to_dict(s) for s in fixed]})
         result.append(fixed)
@@ -306,46 +310,90 @@ def _aggregate_sync_report(cfg: Config, chunks: list[MacroChunk]) -> None:
         log.info("Tổng hợp toàn video: %d đoạn, không lệch nhịp/không bị cắt.", summary["segments"])
 
 
-def _resolve_youtube_source(cfg: Config, *, interactive: bool | None) -> tuple[Path, list[ScriptSegment]]:
-    """Chạy SONG SONG 2 việc độc lập (xem giải thích kiến trúc trong `youtube_source.py`):
-      • Luồng nền: tải video thật về máy bằng `yt-dlp` — cần cho các bước sau (TTS/ghép/mux).
-      • Luồng chính: gửi NGUYÊN VĂN link cho Gemini Web, yêu cầu viết kịch bản cho TOÀN BỘ video.
-    An toàn chạy song song: việc tải dùng `yt-dlp` (không đụng Playwright); việc hỏi Gemini dùng Playwright
-    NHƯNG chỉ ở luồng chính — không có 2 luồng nào cùng thao tác trên 1 trình duyệt cùng lúc.
-    Trả về (đường dẫn video đã tải, danh sách ScriptSegment đã bóc tách — CHƯA qua validate_and_fix, việc
-    đó xảy ra sau khi đã biết ranh giới từng macro-chunk, xem `_distribute_segments_to_chunks`)."""
-    import youtube_source
-    download_path = cfg.workdir / "youtube_source.mp4"
-    download_error: list[Exception] = []
+def _youtube_script_path(cfg: Config) -> Path:
+    return cfg.workdir / "youtube_script.json"
 
-    def _bg_download() -> None:
-        try:
-            youtube_source.download_youtube_video(cfg.youtube_url, download_path)
-        except Exception as e:  # noqa: BLE001 — bắt lại để báo lỗi rõ ràng ở luồng chính, không làm crash luồng nền âm thầm
-            download_error.append(e)
 
-    t = threading.Thread(target=_bg_download, daemon=True, name="youtube-download")
-    t.start()
-    log.info("Đang tải video (chạy nền) VÀ gửi link cho Gemini Web (song song) — không đợi tải xong mới bắt đầu hỏi Gemini.")
-
-    with open_vision_engine(cfg, interactive=interactive) as vision:
-        raw = youtube_source.analyze_youtube_video(vision, cfg, cfg.youtube_url)
-
-    t.join(timeout=1800)
-    if t.is_alive():
-        raise PipelineError("Tải video YouTube quá lâu (>30 phút) — video có thể quá dài hoặc mạng quá chậm.")
-    if download_error:
-        raise download_error[0]
-
+def _parse_youtube_segments(raw: list[dict]) -> list[ScriptSegment]:
     segments: list[ScriptSegment] = []
     for item in raw:
         seg = script_generator._coerce_segment(item)  # noqa: SLF001 — dùng lại nguyên bộ parse chung với mọi nguồn kịch bản khác
         if seg is not None:
             segments.append(seg)
+    return segments
+
+
+def _load_youtube_script(cfg: Config) -> list[ScriptSegment] | None:
+    """Đọc lại kịch bản Gemini đã trả về cho ĐÚNG link này ở lần chạy trước (nếu có). Trả None nếu chưa có,
+    file hỏng, hoặc thuộc link khác — khi đó người gọi sẽ hỏi lại Gemini (chỉ phần kịch bản)."""
+    path = _youtube_script_path(cfg)
+    if not path.is_file():
+        return None
+    try:
+        data = read_json(path)
+        if data.get("url") != cfg.youtube_url:
+            return None
+        segments = _parse_youtube_segments(data["segments"])
+        return segments or None
+    except (PipelineError, KeyError, TypeError):
+        log.warning("File kịch bản YouTube đã lưu bị hỏng → sẽ hỏi lại Gemini.")
+        return None
+
+
+def _fetch_youtube_script(cfg: Config, *, interactive: bool | None) -> list[ScriptSegment]:
+    """Gửi NGUYÊN VĂN link cho Gemini Web, yêu cầu viết kịch bản cho TOÀN BỘ video — rồi LƯU NGAY RA ĐĨA.
+
+    Lưu ngay lập tức là BẮT BUỘC (đã từng là lỗi thật): kết quả này là phần tốn công/thời gian nhất và chỉ
+    có MỘT bản duy nhất. Nếu chỉ giữ trong bộ nhớ, chỉ cần app bị đóng/sập ở bất kỳ bước nào sau đó (vd Bước
+    1 quét khoảng lặng chạy lâu), kịch bản mất sạch và lần chạy lại âm thầm rơi về đường trích-frame-từng-chunk
+    chậm — đúng thứ tính năng này sinh ra để tránh."""
+    import youtube_source
+    with open_vision_engine(cfg, interactive=interactive) as vision:
+        raw = youtube_source.analyze_youtube_video(vision, cfg, cfg.youtube_url)
+    write_json(_youtube_script_path(cfg), {"url": cfg.youtube_url, "segments": raw})
+    segments = _parse_youtube_segments(raw)
     if not segments:
         raise PipelineError("Gemini không trả về đoạn thuyết minh hợp lệ nào từ link YouTube. Thử lại, hoặc "
                             "chạy --check-web / bật chế độ headed để xem Gemini thực sự phản hồi gì.")
-    log.info("Đã nhận %d đoạn thuyết minh từ Gemini (qua link YouTube, chưa kiểm tra/rút gọn).", len(segments))
+    log.info("Đã nhận và LƯU %d đoạn thuyết minh từ Gemini (qua link YouTube) → %s", len(segments),
+             _youtube_script_path(cfg).name)
+    return segments
+
+
+def _resolve_youtube_source(cfg: Config, *, interactive: bool | None, need_video: bool, need_script: bool
+                            ) -> tuple[Path, list[ScriptSegment] | None]:
+    """Bổ sung phần CÒN THIẾU (video và/hoặc kịch bản) — khi cả hai cùng thiếu thì chạy SONG SONG (xem giải
+    thích kiến trúc trong `youtube_source.py`):
+      • Luồng nền: tải video thật về máy bằng `yt-dlp` — cần cho các bước sau (TTS/ghép/mux).
+      • Luồng chính: hỏi Gemini Web lấy kịch bản toàn video (và lưu ngay ra đĩa).
+    An toàn chạy song song: việc tải dùng `yt-dlp` (không đụng Playwright); việc hỏi Gemini dùng Playwright
+    NHƯNG chỉ ở luồng chính — không có 2 luồng nào cùng thao tác trên 1 trình duyệt cùng lúc.
+    Trả về (đường dẫn video, kịch bản hoặc None nếu không cần lấy)."""
+    import youtube_source
+    download_path = youtube_source.local_video_path(cfg.workdir, cfg.youtube_max_height)
+    download_error: list[Exception] = []
+    t: threading.Thread | None = None
+
+    if need_video:
+        def _bg_download() -> None:
+            try:
+                youtube_source.download_youtube_video(cfg.youtube_url, download_path, max_height=cfg.youtube_max_height)
+            except Exception as e:  # noqa: BLE001 — bắt lại để báo lỗi rõ ràng ở luồng chính, không làm crash luồng nền âm thầm
+                download_error.append(e)
+
+        t = threading.Thread(target=_bg_download, daemon=True, name="youtube-download")
+        t.start()
+        log.info("Đang tải video (chạy nền)%s", " VÀ gửi link cho Gemini Web (song song) — không đợi tải xong "
+                 "mới bắt đầu hỏi Gemini." if need_script else ".")
+
+    segments = _fetch_youtube_script(cfg, interactive=interactive) if need_script else None
+
+    if t is not None:
+        t.join(timeout=1800)
+        if t.is_alive():
+            raise PipelineError("Tải video YouTube quá lâu (>30 phút) — video có thể quá dài hoặc mạng quá chậm.")
+        if download_error:
+            raise download_error[0]
     return download_path, segments
 
 
@@ -364,17 +412,28 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
         # LƯU Ý: KHÔNG kiểm tra "video_path vừa có vừa có youtube_url" ở đây — việc đó đã kiểm tra MỘT LẦN
         # lúc khởi tạo Config (config.py __post_init__). Nếu kiểm tra lại ở đây sẽ báo nhầm lỗi khi cfg được
         # TÁI SỬ DỤNG cho lần chạy resume thứ 2 trở đi, vì run() đã tự gán cfg.video_path ở lần chạy đầu.
+        import youtube_source
         cfg.ensure_dirs()
-        cached_video = cfg.workdir / "youtube_source.mp4"
-        if cached_video.is_file() and not cfg.force:
-            log.info("Video từ link YouTube đã tải sẵn ở lần chạy trước → dùng lại, KHÔNG tải lại/gọi Gemini "
-                     "lại: %s (dùng --force nếu muốn lấy lại từ đầu).", cached_video.name)
+        cached_video = youtube_source.local_video_path(cfg.workdir, cfg.youtube_max_height)
+        have_video = cached_video.is_file() and not cfg.force
+        youtube_segments = None if cfg.force else _load_youtube_script(cfg)
+        if have_video and youtube_segments is not None:
+            log.info("Đã có sẵn video (%s) VÀ kịch bản YouTube từ lần chạy trước → dùng lại cả hai, KHÔNG tải "
+                     "lại, KHÔNG hỏi lại Gemini (dùng --force nếu muốn lấy lại từ đầu).", cached_video.name)
+            cfg.video_path = cached_video
+        elif have_video:
+            log.info("Đã có sẵn video (%s) nhưng CHƯA có kịch bản đã lưu → chỉ hỏi Gemini phần kịch bản ở Bước 2 "
+                     "(nếu thật sự còn cần), KHÔNG tải lại video.", cached_video.name)
             cfg.video_path = cached_video
         else:
-            banner(0, PIPELINE_STEPS, "Nhập kịch bản từ link YouTube + tải video (chạy song song)")
+            need_script = youtube_segments is None
+            banner(0, PIPELINE_STEPS, "Nhập kịch bản từ link YouTube + tải video" + (" (chạy song song)" if need_script else ""))
             if on_step:
                 on_step(0, "Đọc link YouTube")
-            cfg.video_path, youtube_segments = _resolve_youtube_source(cfg, interactive=interactive)
+            cfg.video_path, fetched = _resolve_youtube_source(cfg, interactive=interactive, need_video=True,
+                                                               need_script=need_script)
+            if fetched is not None:
+                youtube_segments = fetched
 
     if cfg.video_path is None:
         raise PipelineError("Thiếu video đầu vào.")
@@ -426,9 +485,24 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
         on_step(2, "Tạo kịch bản")
     if cfg.script_file:
         segments_by_chunk = _import_script_file(cfg, chunks, checkpoint)
-    elif youtube_segments is not None:
-        segments_by_chunk = _distribute_segments_to_chunks(youtube_segments, chunks, checkpoint, cfg,
-                                                            source_label=f"link YouTube ({cfg.youtube_url})")
+    elif cfg.youtube_url:
+        # NGUỒN YOUTUBE: TUYỆT ĐỐI KHÔNG rơi về đường "trích frame từng chunk + gọi Gemini từng lô" — đó là
+        # đúng thứ nguồn này sinh ra để tránh (rất chậm, nhất là với video độ phân giải cao).
+        if all(checkpoint.has(c.index, Stage.SCRIPT) for c in chunks):
+            log.info("Kịch bản của MỌI chunk đã có trong checkpoint (RESUME) → không hỏi lại Gemini.")
+            segments_by_chunk = [[_segment_from_dict(d) for d in checkpoint.load(c.index, Stage.SCRIPT)["segments"]]
+                                 for c in chunks]
+            if on_chunk_progress:
+                on_chunk_progress(len(chunks), len(chunks))
+        else:
+            if youtube_segments is None:
+                log.info("Chưa có kịch bản YouTube đã lưu → hỏi Gemini phần kịch bản (KHÔNG tải lại video).")
+                youtube_segments = _fetch_youtube_script(cfg, interactive=interactive)
+            segments_by_chunk = _distribute_segments_to_chunks(
+                youtube_segments, chunks, checkpoint, cfg, source_label=f"link YouTube ({cfg.youtube_url})",
+                invalidate_downstream=True)
+            if on_chunk_progress:
+                on_chunk_progress(len(chunks), len(chunks))
     else:
         with open_vision_engine(cfg, interactive=interactive) as vision:
             segments_by_chunk = []

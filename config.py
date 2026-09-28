@@ -18,6 +18,7 @@ DEFAULT_WORDS_PER_SEC = {"vi": 3.2, "en": 2.5}      # "từ" tiếng Việt = ti
 class Config:
     video_path: Path | None = None
     youtube_url: str | None = None           # thay cho video_path: gửi thẳng link cho Gemini Web, tự tải về sau (xem youtube_source.py)
+    youtube_max_height: int = 1080           # độ cao tối đa khi tải video YouTube (720/1080/1440/2160) — cao hơn = giải mã chậm hơn nhiều
     output_dir: Path = Path("output")
     workdir: Path | None = None
 
@@ -150,6 +151,8 @@ class Config:
             raise ValueError("Chưa hỗ trợ dùng đồng thời youtube_url + highlight_mode: kịch bản lấy qua "
                              "link YouTube dùng mốc thời gian TUYỆT ĐỐI của video gốc, sẽ bị lệch nếu video "
                              "sau đó bị cắt bởi highlight_mode. Tắt một trong hai tuỳ chọn.")
+        if not 144 <= self.youtube_max_height <= 4320:
+            raise ValueError("youtube_max_height phải nằm trong [144, 4320]")
         if self.youtube_url and self.video_path:
             raise ValueError("Vừa có video_path vừa có youtube_url — chỉ được chọn MỘT nguồn video.")
         if self.youtube_url and self.engine != "web":

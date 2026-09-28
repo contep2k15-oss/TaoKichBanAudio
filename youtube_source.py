@@ -42,9 +42,31 @@ def is_youtube_url(url: str) -> bool:
     return bool(_YOUTUBE_RE.match(url.strip()))
 
 
-# ════════════════════════════════════════════════════════════
-# 1) Gửi link cho Gemini Web, nhận kịch bản đầy đủ (không trích frame cục bộ)
-# ════════════════════════════════════════════════════════════
+def local_video_path(workdir: Path, max_height: int) -> Path:
+    """Đường dẫn file video đã tải, ĐẶT TÊN THEO ĐỘ CAO TỐI ĐA đã chọn — đổi chất lượng tải thì tự tải lại
+    file mới (không dùng nhầm bản cũ khác độ phân giải), đồng thời `build_fingerprint` (dựa vào tên/kích
+    thước file) tự tách checkpoint riêng, không lẫn giữa các bản."""
+    return workdir / f"youtube_source_{max_height}p.mp4"
+
+
+def format_selector(max_height: int) -> str:
+    """Chuỗi chọn định dạng của yt-dlp: GIỚI HẠN độ cao và ƯU TIÊN codec H.264 (avc1).
+
+    Vì sao không để yt-dlp tự chọn "tốt nhất": với video YouTube 4K, bản mp4 độ phân giải cao nhất thường
+    là AV1 — codec giải mã bằng phần mềm rất chậm (đo thực tế ~14 khung/giây ở 4K: quét khoảng lặng video
+    19 phút mất 40 phút khi còn giải mã cả hình). Tool này KHÔNG cần 4K để làm việc (chỉ lấy khung nhỏ cho
+    Gemini, còn ghép video dùng `-c:v copy` nên độ phân giải gốc giữ nguyên) — H.264 ≤1080p giải mã nhanh
+    gấp nhiều lần, file nhẹ hơn nhiều, mà kết quả xuất ra vẫn đủ nét cho hầu hết mục đích."""
+    h = int(max_height)
+    if h > 1080:
+        # Người dùng CHỦ ĐỘNG chọn độ phân giải cao (1440p/2160p): tôn trọng lựa chọn — lấy bản cao nhất ≤ h,
+        # không ép H.264 (H.264 hầu như không có ở độ phân giải này nên ép sẽ âm thầm hạ xuống 1080p).
+        return f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/b[height<={h}][ext=mp4]/b[height<={h}]/b"
+    return (f"bv*[height<={h}][vcodec^=avc1][ext=mp4]+ba[ext=m4a]/"
+            f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/"
+            f"b[height<={h}][ext=mp4]/b[height<={h}]/b")
+
+
 def build_youtube_prompt(cfg: Config, url: str) -> str:
     wps = cfg.words_per_sec
     example = [{"id": 1, "start_time": "00:00:01.000", "end_time": "00:00:05.500", "duration_sec": 4.5,
@@ -88,7 +110,8 @@ def analyze_youtube_video(driver: Any, cfg: Config, url: str) -> list[dict]:
 # ════════════════════════════════════════════════════════════
 # 2) Tải video thật về máy (cần cho TTS + ghép audio + xuất video cuối — xem giải thích ở đầu file)
 # ════════════════════════════════════════════════════════════
-def download_youtube_video(url: str, out_path: Path, *, ffmpeg_location: str | None = None) -> Path:
+def download_youtube_video(url: str, out_path: Path, *, max_height: int = 1080,
+                           ffmpeg_location: str | None = None) -> Path:
     """Gọi thư viện `yt-dlp` TRỰC TIẾP qua Python API (không qua subprocess) — để hoạt động đồng nhất cả
     khi chạy từ source lẫn khi đã đóng gói .exe (PyInstaller), nơi không có "trình thông dịch Python" độc
     lập để gọi `python -m yt_dlp` qua subprocess như cách dự án vẫn gọi FFmpeg.
@@ -102,14 +125,14 @@ def download_youtube_video(url: str, out_path: Path, *, ffmpeg_location: str | N
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     opts: dict[str, Any] = {
-        "outtmpl": str(out_path), "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "outtmpl": str(out_path), "format": format_selector(max_height),
         "merge_output_format": "mp4", "quiet": True, "no_warnings": True, "noprogress": True,
         "retries": 3, "socket_timeout": 30, "overwrites": True,
     }
     if ffmpeg_location:
         opts["ffmpeg_location"] = ffmpeg_location
 
-    log.info("Đang tải video từ YouTube: %s", url)
+    log.info("Đang tải video từ YouTube (tối đa %dp, ưu tiên H.264): %s", max_height, url)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])

@@ -51,16 +51,20 @@ def _log_tail(log_path: Path | None, n: int) -> list[str]:
 
 
 def _package_versions() -> list[str]:
+    """Phiên bản đọc qua `importlib.metadata` (tên gói cài đặt pip), KHÔNG qua `module.__version__` — nhiều
+    thư viện (playwright, pydub, pywebview...) không có thuộc tính đó nên trước đây báo nhầm "không rõ phiên
+    bản"/"chưa cài" dù đang chạy bình thường. Cũng chạy được trong .exe đóng gói (PyInstaller có copy metadata)."""
+    from importlib import metadata
     lines = []
-    for pkg in ("streamlit", "pywebview", "playwright", "pydub", "edge_tts", "cv2"):
+    for label, dist in (("streamlit", "streamlit"), ("pywebview", "pywebview"), ("playwright", "playwright"),
+                        ("pydub", "pydub"), ("edge-tts", "edge-tts"), ("opencv", "opencv-python"),
+                        ("yt-dlp", "yt-dlp"), ("google-genai", "google-genai")):
         try:
-            mod = __import__(pkg)
-            ver = getattr(mod, "__version__", None)
-            if ver is None and pkg == "cv2":
-                ver = mod.__version__
-            lines.append(f"  {pkg}: {ver or '(không rõ phiên bản)'}")
-        except Exception:  # noqa: BLE001
-            lines.append(f"  {pkg}: (chưa cài / không import được)")
+            lines.append(f"  {label}: {metadata.version(dist)}")
+        except metadata.PackageNotFoundError:
+            lines.append(f"  {label}: (không tìm thấy thông tin phiên bản — có thể chưa cài, hoặc bản đóng gói thiếu metadata)")
+        except Exception as e:  # noqa: BLE001 — bản thân việc đọc phiên bản để BÁO CÁO LỖI không được phép tự crash
+            lines.append(f"  {label}: (lỗi đọc phiên bản: {type(e).__name__})")
     return lines
 
 

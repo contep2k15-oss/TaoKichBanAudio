@@ -12,6 +12,7 @@ và (b) resume một chunk giữa chừng không xoá mất frame của các chu
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -162,8 +163,21 @@ def _extract_windows_to_dir(cap: Any, cv2: Any, windows: list[tuple[float, float
     out_dir.mkdir(parents=True, exist_ok=True)
     samples: list[FrameSample] = []
     failed = 0
+    total_expected = sum(len(frame_times(ws, we, cfg)) for ws, we in windows)
+    t_start = time.perf_counter()
+    done = 0
     for ws, we in windows:
         for t in frame_times(ws, we, cfg):
+            done += 1
+            # Hiện tiến độ + thời gian còn lại ước tính: bước này có thể rất chậm với video độ phân giải cao /
+            # codec khó giải mã (AV1...) — nếu im lặng hàng chục phút, người dùng không phân biệt được "đang
+            # chạy" với "đã treo". Ghi log mỗi 8 khung hình (INFO, hiện cả trên GUI/log file).
+            if done == 1 or done % 8 == 0:
+                elapsed = time.perf_counter() - t_start
+                per = elapsed / max(done - 1, 1) if done > 1 else 0.0
+                eta = per * (total_expected - done + 1)
+                log.info("Trích frame %d/%d%s", done, total_expected,
+                         f" — {per:.1f}s/khung, còn ~{eta / 60:.1f} phút" if done > 1 else "")
             frame = _read_frame_at(cap, t, fps, total_frames, cv2)
             if frame is None:
                 failed += 1

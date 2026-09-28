@@ -23,7 +23,7 @@ suppress_console_windows()  # xem utils.py — bắt buộc để tiến trình 
 # State
 # ════════════════════════════════════════════════════════════
 DEFAULTS = {
-    "video_path": "", "youtube_url": "", "output_dir": "", "engine": "web", "browser_channel": "chrome",
+    "video_path": "", "youtube_url": "", "youtube_max_height": 1080, "output_dir": "", "engine": "web", "browser_channel": "chrome",
     "web_model_hint": "Flash|Fast|Nhanh", "gemini_model": DEFAULT_GEMINI_MODEL, "api_key": "",
     "tts_engine": "edge", "language": "vi", "voice": "", "style": Config.style,
     "narrator_pov": "", "narrative_style": "natural",
@@ -45,7 +45,7 @@ def build_cfg(*, stop_after: int | None = None) -> Config:
     min_pause, max_pause = st.session_state.pause_range
     default_name = video.stem if video else ("_youtube" if yt_url else "_gui")
     return Config(
-        video_path=video, youtube_url=yt_url,
+        video_path=video, youtube_url=yt_url, youtube_max_height=st.session_state.youtube_max_height,
         output_dir=Path(out_dir) if out_dir else (Path("output") / default_name),
         engine=st.session_state.engine, browser_channel=st.session_state.browser_channel,
         web_model_hint=st.session_state.web_model_hint, gemini_model=st.session_state.gemini_model or None,
@@ -223,6 +223,13 @@ else:
     st.session_state.youtube_url = st.text_input("Link YouTube", st.session_state.youtube_url,
                                                   placeholder="https://www.youtube.com/watch?v=...")
     from youtube_source import is_youtube_url
+    height_options = [720, 1080, 1440, 2160]
+    st.session_state.youtube_max_height = st.selectbox(
+        "Chất lượng video tải về (độ cao tối đa)", height_options,
+        index=height_options.index(st.session_state.youtube_max_height) if st.session_state.youtube_max_height in height_options else 1,
+        format_func=lambda h: f"{h}p" + (" — khuyến nghị (nhanh, đủ nét)" if h == 1080 else (" — 4K, RẤT chậm" if h == 2160 else "")),
+        help="Tool chỉ cần video để ghép giọng đọc, không cần 4K. Bản 4K thường là codec AV1 giải mã cực chậm "
+             "(đã đo: video 19 phút mất ~40 phút chỉ để quét khoảng lặng). 1080p H.264 nhanh gấp nhiều lần.")
     video_ok = bool(st.session_state.youtube_url) and is_youtube_url(st.session_state.youtube_url) and st.session_state.engine == "web"
     if st.session_state.youtube_url and not is_youtube_url(st.session_state.youtube_url):
         st.error("Link không hợp lệ — cần dạng youtube.com/watch?v=..., youtu.be/... hoặc .../shorts/...")

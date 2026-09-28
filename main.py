@@ -101,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Tự động thuyết minh video (kể cả video dài) - Gemini (Web/API) + "
                                 "Edge-TTS/ElevenLabs + pydub + FFmpeg.", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("video", nargs="?", type=Path, help="video đầu vào")
+    p.add_argument("--youtube-max-height", type=int, default=1080, metavar="PIXELS",
+                   help="độ cao tối đa khi tải video YouTube (mặc định 1080 — 4K thường là AV1, giải mã rất chậm)")
     p.add_argument("--youtube-url", metavar="URL", help="THAY cho tham số video: gửi thẳng link YouTube cho "
                    "Gemini Web viết kịch bản (không trích frame cục bộ), video vẫn được tải về máy song "
                    "song để phục vụ ghép/xuất — chỉ dùng được với --engine web")
@@ -211,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         out_dir = args.output_dir or (Path("output") / ("_web" if utility else "_youtube" if have_youtube else args.video.stem))
-        cfg = Config(video_path=None if (utility or have_youtube) else args.video, youtube_url=args.youtube_url,
+        cfg = Config(video_path=None if (utility or have_youtube) else args.video, youtube_url=args.youtube_url, youtube_max_height=args.youtube_max_height,
                      output_dir=out_dir, engine=args.engine,
                      api_key=args.api_key, gemini_model=args.gemini_model, user_data_dir=args.user_data_dir,
                      browser_channel=args.browser, headless=not args.headed, gemini_url=args.gemini_url,
