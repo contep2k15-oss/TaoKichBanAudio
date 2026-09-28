@@ -83,6 +83,8 @@ class Config:
     audio_bitrate: str = "192k"
     min_pause_sec: float = 0.3               # ngẫu nhiên hoá nhịp nghỉ giữa câu: cận dưới (giây)
     max_pause_sec: float = 1.2               # ngẫu nhiên hoá nhịp nghỉ giữa câu: cận trên (giây)
+    max_advance_sec: float = 0.0             # cho phép lời đọc SỚM hơn mốc kịch bản tối đa bao nhiêu giây để nghỉ tự nhiên;
+                                              # 0 = KHỚP TUYỆT ĐỐI mốc thời gian (mặc định — ưu tiên đồng bộ với hình)
 
     # ── TTS engine (Edge-TTS / ElevenLabs — xem engines/, engine_factory.py) ──
     tts_engine: str = "edge"                 # "edge" | "elevenlabs"
@@ -143,6 +145,8 @@ class Config:
             raise ValueError("min_chunk_sec không được lớn hơn chunk_target_sec")
         if self.min_pause_sec < 0 or self.max_pause_sec < self.min_pause_sec:
             raise ValueError("cần 0 ≤ min_pause_sec ≤ max_pause_sec")
+        if not 0.0 <= self.max_advance_sec <= 5.0:
+            raise ValueError("max_advance_sec phải nằm trong [0, 5]")
         if self.narrative_style not in ("natural", "humorous", "formal", "fantasy_inspiring"):
             raise ValueError("narrative_style phải là 'natural', 'humorous', 'formal' hoặc 'fantasy_inspiring'")
         if not 0.0 < self.highlight_target_ratio <= 1.0:

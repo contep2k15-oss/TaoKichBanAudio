@@ -138,7 +138,19 @@ Mục ② "Chọn video" → chọn **🔗 Nhập link YouTube** (chỉ dùng đ
 
 - Lỗi xảy ra → app tự hiện **khối "📋 Báo cáo lỗi"** (có nút copy ở góc phải khối) và lưu file
   `work/error_report_*.txt`. Copy nguyên khối, dán vào chat.
-- Thấy chạy lâu/lạ mà chưa báo lỗi? Mục ④ → mở "🩺 Đang chạy lâu…" → bấm **Tạo báo cáo chẩn đoán** (dùng được
-  bất cứ lúc nào, kể cả khi đang chạy dở, không cần chờ lỗi).
+- Thấy chạy lâu/lạ mà chưa báo lỗi? Mục ④ → mở "🩺 Đang chạy lâu…" → bấm **Tạo báo cáo chẩn đoán** (dùng được khi chưa chạy hoặc sau khi chạy xong/lỗi, không cần chờ crash).
+  **Khi pipeline ĐANG chạy thì đừng bấm nút nào trên trang** — thao tác giao diện có thể làm ngắt lần chạy hiện tại
+  (log sẽ ghi "Lần chạy bị NGẮT giữa chừng"). Muốn xem tiến độ lúc đang chạy: mở `work/pipeline.log` bằng Notepad.
 - Khi trích frame, log hiện tiến độ + thời gian còn lại (`Trích frame 24/96 — 5.3s/khung, còn ~6.4 phút`) —
   nếu thấy con số này quá lớn, nguyên nhân thường là video độ phân giải/codec nặng: chọn nguồn 1080p H.264.
+
+## Đồng bộ lời đọc với hình
+
+Mặc định lời đọc được đặt **đúng mốc thời gian của kịch bản** (ô "Cho phép lời đọc sớm hơn hình tối đa" = 0).
+Nếu muốn khoảng nghỉ giữa câu tự nhiên hơn, nâng ô đó lên (tối đa 1 giây): tool được kéo lời đọc sớm lên, nhưng
+**không bao giờ vượt mức bạn đặt và không cộng dồn**. Sau mỗi lần chạy, `sync_report.json` ghi độ lệch lớn nhất.
+
+## "Chỉ giữ cảnh hay" chạy nhanh hơn
+
+Bước quét nhanh dùng **một lượt FFmpeg** lấy đúng 1 khung mỗi 6 giây (trước đây OpenCV nhảy từng khung và lấy gấp
+đôi số khung — chậm tới hàng chục phút với video AV1/VP9). Log ghi rõ codec của video, và tiến độ quét mỗi ~15 giây.

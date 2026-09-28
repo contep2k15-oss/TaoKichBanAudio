@@ -441,9 +441,13 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
     cfg.ensure_dirs()
     check_binaries()
     media = probe_media(cfg.video_path)
-    log.info("Video: %s | %.1fs | %dx%d @ %.2f fps | âm thanh gốc: %s | engine: %s/%s", cfg.video_path.name,
-             media.duration_sec, media.width, media.height, media.fps, "có" if media.has_audio else "không",
-             cfg.engine, cfg.tts_engine)
+    log.info("Video: %s | %.1fs | %dx%d @ %.2f fps | codec: %s | âm thanh gốc: %s | engine: %s/%s", cfg.video_path.name,
+             media.duration_sec, media.width, media.height, media.fps, media.video_codec or "?",
+             "có" if media.has_audio else "không", cfg.engine, cfg.tts_engine)
+    if media.video_codec in ("av1", "vp9", "hevc"):
+        log.warning("Video dùng codec %s — giải mã bằng phần mềm chậm hơn H.264 rất nhiều; các bước đọc hình sẽ "
+                    "dùng FFmpeg để nhanh nhất có thể. Nếu vẫn chậm, thử nguồn H.264 (vd tải YouTube ở 1080p).",
+                    media.video_codec)
 
     # ── GIAI ĐOẠN 0 (tuỳ chọn): chỉ giữ cảnh hay — chạy TRƯỚC MỌI THỨ khác để không lãng phí tài nguyên
     # phân tích/TTS cho phần video sẽ bị cắt bỏ. Sau bước này, `cfg.video_path`/`media` được THAY THẾ bằng

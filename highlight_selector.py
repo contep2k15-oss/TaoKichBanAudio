@@ -120,16 +120,27 @@ def plan_highlight_windows(vision: BaseVisionEngine, cfg: Config, media: MediaIn
     step = duration / n_windows
     frame_times = [(i + 0.5) * step for i in range(n_windows)]
 
-    cap = vp._open_capture(cfg.video_path)  # noqa: SLF001 — tái dùng tiện ích nội bộ của video_processor
+    out_dir = cfg.workdir / "highlight_frames"
+    # ĐÚNG 1 khung ở giữa mỗi cửa sổ (n_windows khung). Cách chính: MỘT lượt FFmpeg tuần tự (nhanh, dùng bộ
+    # giải mã tốt nhất kể cả AV1); nếu lỗi mới rơi về OpenCV nhảy từng khung (chậm với video GOP dài).
+    samples = None
     try:
-        import cv2
-        fps = cap.get(cv2.CAP_PROP_FPS) or media.fps
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        windows_1x1 = [(t - step / 2, t + step / 2) for t in frame_times]
-        out_dir = cfg.workdir / "highlight_frames"
-        samples = vp._extract_windows_to_dir(cap, cv2, windows_1x1, out_dir, cfg, fps, total_frames)  # noqa: SLF001
-    finally:
-        cap.release()
+        samples = vp.extract_uniform_frames_ffmpeg(cfg.video_path, start=step / 2, step=step, count=n_windows,
+                                                   duration=duration, out_dir=out_dir, cfg=cfg)
+    except Exception as e:  # noqa: BLE001 — mọi lỗi ở đường nhanh đều phải rơi về đường dự phòng, không được dừng cả pipeline
+        log.warning("Quét nhanh bằng FFmpeg lỗi (%s) → dùng OpenCV.", e)
+    if not samples:
+        log.info("Dùng OpenCV để lấy khung (chậm hơn với video độ phân giải cao).")
+        cap = vp._open_capture(cfg.video_path)  # noqa: SLF001 — tái dùng tiện ích nội bộ của video_processor
+        try:
+            import cv2
+            fps = cap.get(cv2.CAP_PROP_FPS) or media.fps
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            windows = [(t - step / 2, t + step / 2) for t in frame_times]
+            samples = vp._extract_windows_to_dir(cap, cv2, windows, out_dir, vp._OneFramePerWindowCfg(cfg), fps,  # noqa: SLF001
+                                                 total_frames)
+        finally:
+            cap.release()
 
     per_prompt = min(cfg.frames_per_prompt, 10 if cfg.engine == "web" else 16)
     batches = [samples[i:i + per_prompt] for i in range(0, len(samples), per_prompt)]

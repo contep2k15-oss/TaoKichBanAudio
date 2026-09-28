@@ -203,6 +203,106 @@ def _extract_windows_to_dir(cap: Any, cv2: Any, windows: list[tuple[float, float
     return samples
 
 
+def extract_uniform_frames_ffmpeg(video: Path, *, start: float, step: float, count: int, duration: float,
+                                  out_dir: Path, cfg: Config) -> list[FrameSample] | None:
+    """Lấy `count` khung CÁCH ĐỀU `step` giây (khung đầu tại `start`) bằng MỘT lượt FFmpeg tuần tự.
+
+    Vì sao không dùng OpenCV nhảy tới từng khung (`_read_frame_at`): mỗi lần nhảy phải giải mã lại từ khung
+    khoá (keyframe) gần nhất tới khung đích — với video AV1/VP9 GOP dài (kiểu tải từ YouTube) mỗi khung có
+    thể mất hàng giây (đo thực tế trên máy người dùng: ~4,7 giây/khung ở 1080p → 380 khung ≈ 30 phút). Ngoài
+    ra bộ giải mã trong OpenCV không đảm bảo hỗ trợ AV1 (đo: 0/12 khung ở môi trường thử). FFmpeg đọc tuần tự
+    một lần, dùng bộ giải mã tốt nhất (dav1d cho AV1, đa luồng) và dừng ngay khi đủ `count` khung.
+
+    Trả về None nếu FFmpeg lỗi/không ra khung nào — người gọi tự rơi về đường OpenCV. Mỗi ảnh được đóng dấu
+    thời gian (giống đường OpenCV) và đặt tên theo cùng quy ước `frame_{idx}_{ms}.jpg`."""
+    import subprocess
+
+    import numpy as np
+
+    try:
+        import cv2
+    except ImportError:
+        return None
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in list(out_dir.glob("ff_*.jpg")) + list(out_dir.glob("frame_*.jpg")):
+        old.unlink(missing_ok=True)
+
+    q = max(2, min(31, round((100 - cfg.jpeg_quality) * 0.3) + 2))          # thang chất lượng mjpeg: 2 (tốt nhất)…31
+    # QUAN TRỌNG: filter `fps` căn khung theo LƯỚI THỜI GIAN TUYỆT ĐỐI (bội số của `step`), KHÔNG theo điểm bắt
+    # đầu — dùng thẳng `fps=1/step` với start=3, step=6 sẽ lấy khung ở 6, 12, 18… thay vì 3, 9, 15… (lệch tới
+    # nửa cửa sổ; đã đo thực tế). Nên dịch trục thời gian đi `delta = start mod step` để các mốc mong muốn
+    # trùng đúng lưới, rồi mới lấy mẫu.
+    delta = start % step
+    vf = (f"setpts=PTS-{delta:.6f}/TB,fps=1/{step:.6f},"
+          f"scale=w='min({cfg.frame_max_width},iw)':h=-2")
+    cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+           "-ss", f"{start:.3f}", "-i", str(video), "-an", "-sn", "-dn", "-vf", vf,
+           "-frames:v", str(count), "-q:v", str(q), "-start_number", "0", str(out_dir / "ff_%05d.jpg")]
+    log.info("Quét nhanh bằng FFmpeg (một lượt tuần tự): %d khung, cách nhau %.1fs...", count, step)
+    t_begin = time.perf_counter()
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        log.warning("Không tìm thấy ffmpeg trong PATH → dùng OpenCV.")
+        return None
+
+    total_out = max(count * step, 1.0)
+    last_log, err_tail = t_begin, []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.strip()
+        if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+            try:
+                done_sec = int(line.split("=", 1)[1]) / 1_000_000
+            except ValueError:
+                continue
+            now = time.perf_counter()
+            if now - last_log >= 15:                     # báo tiến độ mỗi ~15 giây
+                last_log = now
+                frac = min(max(done_sec / total_out, 0.0), 1.0)
+                eta = (now - t_begin) * (1 - frac) / frac if frac > 0.01 else 0
+                log.info("Quét nhanh: %.0f%%%s", frac * 100, f" — còn ~{eta / 60:.1f} phút" if eta else "")
+        elif "=" not in line and line:
+            err_tail.append(line)
+    rc = proc.wait()
+    files = sorted(out_dir.glob("ff_*.jpg"))
+    if rc != 0 or not files:
+        log.warning("FFmpeg quét nhanh thất bại (mã %s, %d ảnh): %s", rc, len(files), " | ".join(err_tail[-3:]))
+        return None
+
+    samples: list[FrameSample] = []
+    for k, f in enumerate(files):
+        t = start + k * step
+        img = cv2.imdecode(np.frombuffer(f.read_bytes(), np.uint8), cv2.IMREAD_COLOR)   # Unicode-safe trên Windows
+        f.unlink(missing_ok=True)
+        if img is None:
+            continue
+        img = _stamp(img, format_timestamp(t), cv2)
+        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), cfg.jpeg_quality])
+        if not ok:
+            continue
+        idx = len(samples) + 1
+        path = out_dir / f"frame_{idx:04d}_{int(t * 1000):08d}.jpg"
+        path.write_bytes(buf.tobytes())
+        samples.append(FrameSample(idx, t, path, max(0.0, t - step / 2), min(duration, t + step / 2)))
+    log.info("Quét nhanh xong: %d khung trong %.0fs (%.2fs/khung).", len(samples), time.perf_counter() - t_begin,
+             (time.perf_counter() - t_begin) / max(len(samples), 1))
+    return samples or None
+
+
+class _OneFramePerWindowCfg:
+    """Cấu hình tối thiểu ép `frame_times()` trả ĐÚNG 1 khung/cửa sổ (dùng cho đường dự phòng OpenCV của bước
+    quét highlight — trước đây dùng chung khoảng lấy mẫu 2,5s nên ra 2 khung/cửa sổ 6s, gấp đôi cần thiết)."""
+
+    def __init__(self, cfg: Config):
+        self.max_frames_per_window = 1
+        self.frame_interval_sec = cfg.frame_interval_sec
+        self.frame_max_width = cfg.frame_max_width
+        self.jpeg_quality = cfg.jpeg_quality
+
+
 def extract_samples(cfg: Config, media: MediaInfo) -> list[FrameSample]:
     """Trích frame cho TOÀN BỘ video (dùng khi video ngắn hơn ngưỡng chia chunk — xem long_video_pipeline.py)."""
     try:

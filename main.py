@@ -173,6 +173,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--voice-gain", type=float, default=0.0, help="tăng/giảm âm lượng giọng đọc (dB)")
     g.add_argument("--min-pause", type=float, default=0.3, help="ngẫu nhiên hoá nhịp nghỉ giữa câu: cận dưới (giây)")
     g.add_argument("--max-pause", type=float, default=1.2, help="ngẫu nhiên hoá nhịp nghỉ giữa câu: cận trên (giây)")
+    g.add_argument("--max-advance", type=float, default=0.0, help="cho phép lời đọc SỚM hơn mốc kịch bản tối đa bao nhiêu "
+                   "giây (chỉ khi >0 thì --min-pause/--max-pause mới có tác dụng). 0 = khớp tuyệt đối mốc thời gian (mặc định)")
 
     g = p.add_argument_group("điều khiển")
     g.add_argument("--script-file", type=Path, help="dùng kịch bản JSON có sẵn (bỏ qua trích frame & Gemini)")
@@ -233,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
                      max_speedup=args.max_speedup, allow_video_retime=args.allow_video_retime,
                      tts_concurrency=args.tts_concurrency, bgm_duck_ratio=args.bgm_duck,
                      keep_bgm=not args.no_bgm, voice_gain_db=args.voice_gain,
-                     min_pause_sec=args.min_pause, max_pause_sec=args.max_pause, script_file=args.script_file,
+                     min_pause_sec=args.min_pause, max_pause_sec=args.max_pause, max_advance_sec=args.max_advance, script_file=args.script_file,
                      stop_after=args.stop_after, force=args.force, keep_temp=args.keep_temp)
     except (ValueError, OSError) as e:
         print(f"Cấu hình không hợp lệ: {e}", file=sys.stderr)

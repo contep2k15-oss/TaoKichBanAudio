@@ -6,17 +6,12 @@ KHÔNG dùng `ffmpeg -filter_complex` cho N file lẻ (tránh WinError 206). Tha
   3. Xuất MỘT file duy nhất: final_voiceover.mp3
 Đồng thời kiểm tra lệch timestamp và ghi sync_report.json.
 
-NGẪU NHIÊN HOÁ KHOẢNG NGHỈ GIỮA CÂU (`cfg.min_pause_sec`/`cfg.max_pause_sec`):
-Gemini tự chọn mốc `start_time` cho từng câu theo nội dung cảnh quay — khoảng cách "danh nghĩa" giữa hai
-câu (từ lúc audio câu trước dứt tới `start_time` câu sau) vì vậy vốn đã không cố định, nhưng Gemini có xu
-hướng bám khá sát ngưỡng tối thiểu đã ra lệnh trong prompt (~0.2s) ở nhiều câu, nghe lặp nhịp, máy móc.
-Ở ĐÂY, ngay trước khi đặt một đoạn lên track, nếu khoảng trống THỰC TẾ (giữa điểm audio câu trước vừa đặt
-xong kết thúc, và `start_time` gốc của câu này) LỚN HƠN một khoảng nghỉ ngẫu nhiên trong
-[min_pause_sec, max_pause_sec], ta CHỦ ĐỘNG RÚT NGẮN khoảng trống đó xuống đúng bằng khoảng nghỉ ngẫu
-nhiên vừa chọn — tức kéo câu này sớm lên. Tuyệt đối KHÔNG BAO GIỜ đẩy trễ một câu hay "bịa" thêm khoảng
-lặng vượt quá phần dư sẵn có — chỉ rút ngắn phần dư đã tồn tại tự nhiên, nên không ảnh hưởng gì tới đồng
-bộ hình ảnh (câu chỉ có thể sớm lên tối đa bằng khoảng trống vốn đã có). Nếu khoảng trống tự nhiên đã nhỏ
-hơn hoặc bằng khoảng nghỉ ngẫu nhiên chọn được, giữ nguyên, không có gì để rút ngắn.
+ĐỒNG BỘ VỚI HÌNH LÀ ƯU TIÊN SỐ MỘT: mặc định (`cfg.max_advance_sec = 0`) mỗi câu được đặt ĐÚNG mốc `start_time`
+của kịch bản. Tuỳ chọn "nghỉ ngẫu nhiên" (`min_pause_sec`/`max_pause_sec`) chỉ có tác dụng khi bạn chủ động cho
+phép lời đọc sớm hơn mốc một khoảng nhỏ (`max_advance_sec` > 0): khi đó, nếu khoảng trống thực tế trước một câu
+lớn hơn khoảng nghỉ ngẫu nhiên chọn được, câu được kéo sớm lên — nhưng KHÔNG BAO GIỜ quá `max_advance_sec` so
+với mốc gốc và KHÔNG cộng dồn (mỗi câu neo vào mốc của chính nó, không neo vào cuối câu trước). Bản cũ neo vào
+cuối câu trước nên độ lệch tích luỹ không giới hạn (đo được 104 giây sau 60 câu) — đó là lỗi đã sửa.
 """
 from __future__ import annotations
 
@@ -67,6 +62,7 @@ def assemble_voiceover_track(results: list[TTSResult], total_video_ms: int, cfg:
     out_path = out_path or cfg.voiceover_path
     report_path = report_path or cfg.sync_report_path
     rng = rng or random.Random()
+    max_advance_ms = int(round(cfg.max_advance_sec * 1000))
     if total_video_ms <= 0:
         raise PipelineError("Độ dài video không hợp lệ.")
     track = AudioSegment.silent(duration=total_video_ms, frame_rate=TRACK_SAMPLE_RATE)
@@ -88,19 +84,26 @@ def assemble_voiceover_track(results: list[TTSResult], total_video_ms: int, cfg:
             log.warning("Đoạn %d bắt đầu (%dms) sau khi video kết thúc → bỏ.", r.id, original_pos)
             continue
 
-        # ── ngẫu nhiên hoá khoảng nghỉ: chỉ RÚT NGẮN khoảng trống tự nhiên đã có, không bao giờ tạo thêm ──
+        # ── ngẫu nhiên hoá khoảng nghỉ, NEO VÀO MỐC GỐC ──
+        # Mốc mỗi câu KHÔNG BAO GIỜ lệch quá `max_advance_sec` so với mốc kịch bản (mặc định 0 = khớp tuyệt đối).
+        # Đây là sửa lỗi nghiêm trọng của bản cũ: trước đây mỗi câu được đặt tại `cuối câu trước + nghỉ ngẫu
+        # nhiên`, mà "cuối câu trước" lại đã bị kéo sớm → độ lệch CỘNG DỒN qua từng câu (đo: 104 giây sau 60 câu),
+        # âm thanh chạy nhanh hơn hình không giới hạn. Giờ mỗi câu tự neo lại vào mốc gốc của chính nó nên
+        # độ lệch tối đa là hằng số, không tích luỹ theo độ dài video.
         pause_shrink = 0
         pos = original_pos
-        if i > 0:
+        if i > 0 and max_advance_ms > 0:
             natural_gap = original_pos - prev_end_ms
             if natural_gap > 0:
                 target_pause = int(round(rng.uniform(cfg.min_pause_sec, cfg.max_pause_sec) * 1000))
-                applied_pause = min(target_pause, natural_gap)
-                pos = prev_end_ms + applied_pause
-                pause_shrink = natural_gap - applied_pause
+                want = max(0, natural_gap - target_pause)            # cần kéo sớm bao nhiêu để đạt đúng nghỉ mục tiêu
+                # Đủ trong trần → đạt đúng khoảng nghỉ mục tiêu. Vượt trần → chọn NGẪU NHIÊN trong [0, trần] (nếu luôn
+                # dùng đúng trần thì mọi câu lệch y hệt nhau, mất hẳn tính ngẫu nhiên).
+                pause_shrink = want if want <= max_advance_ms else int(rng.uniform(0, max_advance_ms))
+                pos = original_pos - pause_shrink
                 if pause_shrink > 0:
-                    log.debug("Đoạn %d: rút ngắn khoảng nghỉ %dms → %dms (nghỉ ngẫu nhiên mục tiêu %dms).",
-                             r.id, natural_gap, applied_pause, target_pause)
+                    log.debug("Đoạn %d: sớm hơn mốc %dms (khoảng trống tự nhiên %dms → nghỉ mục tiêu %dms).",
+                             r.id, pause_shrink, natural_gap, target_pause)
 
         try:
             seg_audio = (AudioSegment.from_file(r.fitted_path)
@@ -154,10 +157,14 @@ def _verify_and_report(placed: list[PlacedSegment], mp3_path: Path, total_video_
     clipped = [p for p in placed if p.clipped_ms > 0]
     overlaps = [(a.id, b.id) for a, b in zip(placed, placed[1:]) if a.placed_end_ms > b.placed_start_ms]
     n_shrunk = sum(1 for p in placed if p.pause_shrink_ms > 0)
+    max_abs_drift = max((abs(p.start_drift_ms) for p in placed), default=0)
 
     log.info("Kiểm tra đồng bộ: %d đoạn | lệch điểm bắt đầu >%dms (đã trừ rút ngắn nghỉ chủ động): %d | "
              "lấn qua end_time: %d | bị cắt: %d | chồng lấn: %d | đã rút ngắn nghỉ ở %d đoạn",
              len(placed), DRIFT_TOLERANCE_MS, len(bad_drift), len(overruns), len(clipped), len(overlaps), n_shrunk)
+    limit_ms = int(round(cfg.max_advance_sec * 1000))
+    (log.warning if max_abs_drift > limit_ms + DRIFT_TOLERANCE_MS else log.info)(
+        "Độ lệch lớn nhất của lời đọc so với mốc kịch bản: %dms (cho phép tối đa %dms).", max_abs_drift, limit_ms)
     for p in bad_drift:
         log.warning("  #%d lệch %+dms so với start_time (không giải thích được bởi rút ngắn nghỉ).",
                     p.id, p.start_drift_ms + p.pause_shrink_ms)
@@ -177,7 +184,8 @@ def _verify_and_report(placed: list[PlacedSegment], mp3_path: Path, total_video_
         "total_video_ms": total_video_ms, "voiceover_mp3_ms": mp3_ms,
         "summary": {"segments": len(placed), "start_drift_over_tolerance": len(bad_drift),
                     "overruns": len(overruns), "clipped": len(clipped), "overlaps": len(overlaps),
-                    "pause_shrunk_segments": n_shrunk},
+                    "pause_shrunk_segments": n_shrunk,
+                    "max_abs_drift_ms": max_abs_drift, "allowed_advance_ms": limit_ms},
         "segments": [asdict(p) for p in placed]})
     log.info("Đã xuất %s và báo cáo %s", mp3_path.name, report_path.name)
 

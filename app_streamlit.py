@@ -6,6 +6,7 @@ Không cần Internet ngoài việc gọi Gemini/TTS — Streamlit tự mở m�
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 from pathlib import Path
@@ -30,7 +31,7 @@ DEFAULTS = {
     "elevenlabs_api_key": "", "elevenlabs_model": "eleven_multilingual_v2",
     "mode": "interval", "interval": 2.5, "scene_threshold": 0.35,
     "chunk_minutes": 4.0, "bgm_duck": 0.7, "no_bgm": False, "max_speedup": 1.25,
-    "pause_range": (0.3, 1.2),
+    "pause_range": (0.3, 1.2), "max_advance": 0.0,
     "highlight_mode": False, "highlight_target_ratio": 0.4, "highlight_frame_interval": 6.0,
     "force": False, "verbose": False, "chrome_proc": None, "result": None, "running": False,
 }
@@ -40,8 +41,14 @@ for k, v in DEFAULTS.items():
 
 def build_cfg(*, stop_after: int | None = None) -> Config:
     out_dir = st.session_state.output_dir.strip() or None
-    video = Path(st.session_state.video_path).expanduser() if st.session_state.video_path.strip() else None
-    yt_url = st.session_state.youtube_url.strip() or None
+    # Chỉ lấy nguồn THEO CHẾ ĐỘ ĐANG CHỌN. Không được dựa vào giá trị còn sót lại của chế độ kia: khi bạn đổi
+    # từ "link YouTube" sang "Tải video lên", link cũ vẫn nằm trong bộ nhớ đến khi đoạn code xoá nó chạy (nằm
+    # SAU mục đăng nhập, vốn cũng gọi build_cfg) — trước đây chính điều này làm trang sập khi vừa đổi chế độ và
+    # đã tick "Chỉ giữ cảnh hay". `source_mode` luôn đã cập nhật ngay từ đầu lần chạy này.
+    mode = st.session_state.get("source_mode", "upload")
+    video = (Path(st.session_state.video_path).expanduser()
+             if mode == "upload" and st.session_state.video_path.strip() else None)
+    yt_url = (st.session_state.youtube_url.strip() or None) if mode == "youtube" else None
     min_pause, max_pause = st.session_state.pause_range
     default_name = video.stem if video else ("_youtube" if yt_url else "_gui")
     return Config(
@@ -58,7 +65,11 @@ def build_cfg(*, stop_after: int | None = None) -> Config:
         scene_threshold=st.session_state.scene_threshold, chunk_target_sec=st.session_state.chunk_minutes * 60.0,
         bgm_duck_ratio=st.session_state.bgm_duck, keep_bgm=not st.session_state.no_bgm,
         max_speedup=st.session_state.max_speedup, min_pause_sec=min_pause, max_pause_sec=max_pause,
-        highlight_mode=st.session_state.highlight_mode, highlight_target_ratio=st.session_state.highlight_target_ratio,
+        max_advance_sec=st.session_state.max_advance,
+        # Tổ hợp link YouTube + highlight chưa được hỗ trợ (Config từ chối). Giao diện CHẶN việc chạy và báo rõ lý do;
+        # ở đây chỉ đảm bảo build_cfg() không bao giờ ném lỗi làm sập cả trang (từng xảy ra ở mục đăng nhập).
+        highlight_mode=st.session_state.highlight_mode and yt_url is None,
+        highlight_target_ratio=st.session_state.highlight_target_ratio,
         highlight_frame_interval_sec=st.session_state.highlight_frame_interval,
         force=st.session_state.force, stop_after=stop_after,
     )
@@ -132,6 +143,8 @@ with st.sidebar:
     st.subheader("🎬 Chỉ giữ cảnh hay")
     st.session_state.highlight_mode = st.checkbox("Chỉ giữ lại những cảnh đắt giá và thêm thuyết minh, cắt bỏ phần thừa",
                                                   st.session_state.highlight_mode)
+    if st.session_state.highlight_mode and st.session_state.get("source_mode") == "youtube":
+        st.warning("Chưa dùng được cùng lúc với link YouTube (đang phát triển). Bỏ tick ô này để chạy bằng link.")
     if st.session_state.highlight_mode:
         st.session_state.highlight_target_ratio = st.slider("Giữ lại khoảng bao nhiêu % video gốc", 0.1, 0.9,
                                                              st.session_state.highlight_target_ratio, 0.05)
@@ -143,10 +156,16 @@ with st.sidebar:
         st.session_state.interval = st.slider("Khoảng lấy mẫu (giây)", 1.0, 6.0, st.session_state.interval, 0.5)
         st.session_state.chunk_minutes = st.slider("Độ dài mỗi chunk (phút) — video dài", 1.0, 15.0, st.session_state.chunk_minutes, 0.5)
         st.session_state.max_speedup = st.slider("Tăng tốc audio tối đa", 1.0, 1.5, st.session_state.max_speedup, 0.05)
-        st.session_state.pause_range = st.slider("Khoảng nghỉ ngẫu nhiên giữa các câu (giây)", 0.0, 3.0,
-                                                 st.session_state.pause_range, 0.05,
-                                                 help="Chỉ RÚT NGẮN khoảng trống tự nhiên đã có giữa 2 câu, không "
-                                                 "bao giờ thêm khoảng lặng mới hay làm lệch hình ảnh.")
+        st.session_state.max_advance = st.slider(
+            "Cho phép lời đọc sớm hơn hình tối đa (giây)", 0.0, 1.0, st.session_state.max_advance, 0.05,
+            help="0 = KHỚP TUYỆT ĐỐI mốc thời gian của kịch bản (khuyến nghị — lời đọc luôn đúng hình). Lớn hơn 0: "
+                 "tool được kéo lời đọc sớm lên tối đa chừng này để khoảng nghỉ giữa câu tự nhiên hơn. Độ lệch KHÔNG "
+                 "bao giờ vượt mức này và không cộng dồn theo độ dài video.")
+        st.session_state.pause_range = st.slider(
+            "Khoảng nghỉ ngẫu nhiên giữa các câu (giây)", 0.0, 3.0, st.session_state.pause_range, 0.05,
+            disabled=st.session_state.max_advance == 0,
+            help="Chỉ có tác dụng khi cho phép lời đọc sớm hơn hình (ô ngay phía trên > 0). Chỉ RÚT NGẮN khoảng "
+                 "trống tự nhiên đã có giữa 2 câu, không bao giờ thêm khoảng lặng mới.")
         st.session_state.no_bgm = st.checkbox("Bỏ hẳn âm thanh gốc", st.session_state.no_bgm)
         if not st.session_state.no_bgm:
             st.session_state.bgm_duck = st.slider("Âm lượng nhạc nền khi có giọng đọc", 0.1, 1.0, st.session_state.bgm_duck, 0.05)
@@ -231,6 +250,11 @@ else:
         help="Tool chỉ cần video để ghép giọng đọc, không cần 4K. Bản 4K thường là codec AV1 giải mã cực chậm "
              "(đã đo: video 19 phút mất ~40 phút chỉ để quét khoảng lặng). 1080p H.264 nhanh gấp nhiều lần.")
     video_ok = bool(st.session_state.youtube_url) and is_youtube_url(st.session_state.youtube_url) and st.session_state.engine == "web"
+    if st.session_state.highlight_mode:
+        st.error("Chưa hỗ trợ dùng \"Chỉ giữ cảnh hay\" cùng với link YouTube (mốc kịch bản lấy qua link sẽ lệch sau "
+                 "khi cắt video — tính năng cắt ghép theo highlight cho link đang được phát triển). "
+                 "Hãy bỏ tick ô đó ở thanh bên trái (mục 🎬 Chỉ giữ cảnh hay) để chạy tiếp.")
+        video_ok = False
     if st.session_state.youtube_url and not is_youtube_url(st.session_state.youtube_url):
         st.error("Link không hợp lệ — cần dạng youtube.com/watch?v=..., youtu.be/... hoặc .../shorts/...")
     elif video_ok:
@@ -273,8 +297,9 @@ if video_ok:
 # ════════════════════════════════════════════════════════════
 st.subheader("④ Chạy")
 with st.expander("🩺 Đang chạy lâu/thấy lạ mà chưa báo lỗi gì? Tạo báo cáo chẩn đoán để gửi Claude"):
-    st.caption("Bấm nút bên dưới bất cứ lúc nào (kể cả khi chưa gặp lỗi) — chụp lại đúng trạng thái/cấu "
-              "hình/log hiện tại, không phải đợi crash mới có gì để gửi.")
+    st.caption("Chụp lại trạng thái/cấu hình/log hiện tại — dùng được cả khi chưa gặp lỗi gì. LƯU Ý: khi ĐANG chạy "
+              "thì đừng bấm nút nào trên trang (kể cả nút này): thao tác trên giao diện có thể làm ngắt lần chạy "
+              "hiện tại. Cần xem tiến độ lúc đang chạy thì mở thẳng file `work/pipeline.log` bằng Notepad.")
     if st.button("Tạo báo cáo chẩn đoán ngay bây giờ"):
         try:
             cfg_now = build_cfg()
@@ -355,6 +380,14 @@ if run_plan or run_script_only or run_tts_only or run_full:
         status_box.update(label="Lỗi không lường trước", state="error")
         st.exception(e)
         _show_error_report(e, "Lỗi không lường trước (Exception)")
+    except BaseException as e:  # noqa: BLE001 — gồm RerunException/StopException của Streamlit, KeyboardInterrupt...
+        # Lần chạy bị NGẮT giữa chừng (không phải lỗi): thường do thao tác trên giao diện khi đang chạy (Streamlit
+        # ngắt lần chạy hiện tại để chạy lại trang) hoặc đóng trang. Trước đây KHÔNG để lại dấu vết nào trong log
+        # nên log chỉ dừng im lặng giữa chừng; giờ ghi rõ để báo cáo chẩn đoán cho thấy nguyên nhân.
+        logging.getLogger("svvc.gui").warning(
+            "Lần chạy bị NGẮT giữa chừng bởi %s (thường do bấm nút/thao tác trên giao diện khi đang chạy, hoặc đóng "
+            "trang). Bấm lại đúng nút để tiếp tục — phần đã xong được giữ nguyên.", type(e).__name__)
+        raise
     finally:
         st.session_state.running = False
 

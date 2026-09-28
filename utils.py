@@ -251,6 +251,7 @@ class MediaInfo:
     width: int
     height: int
     fps: float
+    video_codec: str = ""   # vd 'h264', 'av1', 'vp9' — codec khó giải mã (av1/vp9) là nguyên nhân hay gặp khi trích frame chậm
 
     @property
     def duration_ms(self) -> int:
@@ -306,4 +307,4 @@ def probe_media(path: Path) -> MediaInfo:
 
     return MediaInfo(path=path, duration_sec=duration, has_audio=has_audio,
                      width=int(video.get("width") or 0), height=int(video.get("height") or 0),
-                     fps=fps or 25.0)
+                     fps=fps or 25.0, video_codec=str(video.get("codec_name") or ""))
