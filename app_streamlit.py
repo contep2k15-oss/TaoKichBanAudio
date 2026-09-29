@@ -6,7 +6,6 @@ Không cần Internet ngoài việc gọi Gemini/TTS — Streamlit tự mở m�
 """
 from __future__ import annotations
 
-import logging
 import subprocess
 import time
 from pathlib import Path
@@ -15,7 +14,7 @@ import streamlit as st
 
 from config import DEFAULT_GEMINI_MODEL, Config
 from error_report import build_error_report, save_error_report
-from utils import GeminiWebError, PipelineError, WebAuthError, suppress_console_windows
+from utils import GeminiWebError, suppress_console_windows
 
 st.set_page_config(page_title="Silent Video Voiceover Creator", page_icon="🎙️", layout="wide")
 suppress_console_windows()  # xem utils.py — bắt buộc để tiến trình con của pydub không tự bật console Windows
@@ -33,7 +32,7 @@ DEFAULTS = {
     "chunk_minutes": 4.0, "bgm_duck": 0.7, "no_bgm": False, "max_speedup": 1.25,
     "pause_range": (0.3, 1.2), "max_advance": 0.0,
     "highlight_mode": False, "highlight_target_ratio": 0.4, "highlight_frame_interval": 6.0,
-    "force": False, "verbose": False, "chrome_proc": None, "result": None, "running": False,
+    "force": False, "verbose": False, "chrome_proc": None,
 }
 for k, v in DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -297,9 +296,8 @@ if video_ok:
 # ════════════════════════════════════════════════════════════
 st.subheader("④ Chạy")
 with st.expander("🩺 Đang chạy lâu/thấy lạ mà chưa báo lỗi gì? Tạo báo cáo chẩn đoán để gửi Claude"):
-    st.caption("Chụp lại trạng thái/cấu hình/log hiện tại — dùng được cả khi chưa gặp lỗi gì. LƯU Ý: khi ĐANG chạy "
-              "thì đừng bấm nút nào trên trang (kể cả nút này): thao tác trên giao diện có thể làm ngắt lần chạy "
-              "hiện tại. Cần xem tiến độ lúc đang chạy thì mở thẳng file `work/pipeline.log` bằng Notepad.")
+    st.caption("Chụp lại trạng thái/cấu hình/log hiện tại — dùng được bất cứ lúc nào, KỂ CẢ khi pipeline đang "
+              "chạy nền: từ bản này, xem/tạo báo cáo không còn làm gián đoạn tiến trình đang chạy nữa.")
     if st.button("Tạo báo cáo chẩn đoán ngay bây giờ"):
         try:
             cfg_now = build_cfg()
@@ -312,111 +310,141 @@ with st.expander("🩺 Đang chạy lâu/thấy lạ mà chưa báo lỗi gì? T
             st.caption(f"Đã lưu vào: `{saved}`")
 st.caption("Có thể bấm từng nút một, theo đúng thứ tự ①→④, để kiểm tra kết quả mỗi bước trước khi sang bước "
           "kế — hoặc bấm thẳng nút cuối để chạy hết một lượt. Mọi nút đều tự tiếp tục từ chỗ dở dang, không "
-          "làm lại phần đã xong.")
+          "làm lại phần đã xong. Pipeline chạy Ở LUỒNG NỀN THẬT SỰ — thao tác gì trên trang (kể cả đổi tab, "
+          "F5) trong lúc đang chạy cũng KHÔNG làm gián đoạn nó nữa.")
+
+import background_jobs as bg  # noqa: E402
+
+preview_cfg = build_cfg() if video_ok else None
+current_job = bg.get_job(preview_cfg.workdir) if preview_cfg else None
+running_now = current_job is not None and current_job.state == "running"
+
 b1, b2, b3, b4 = st.columns(4)
-run_plan = b1.button("① Phân đoạn", disabled=not video_ok or st.session_state.running, use_container_width=True,
+run_plan = b1.button("① Phân đoạn", disabled=not video_ok or running_now, use_container_width=True,
                      help="Chỉ chia video thành các đoạn (chunk) an toàn — chưa gọi Gemini, chưa tốn TTS.")
-run_script_only = b2.button("② Kịch bản", disabled=not video_ok or st.session_state.running, use_container_width=True,
+run_script_only = b2.button("② Kịch bản", disabled=not video_ok or running_now, use_container_width=True,
                             help="Trích frame + gọi Gemini viết lời thuyết minh cho mọi chunk — DỪNG trước khi tốn TTS.")
-run_tts_only = b3.button("③ Giọng đọc", disabled=not video_ok or st.session_state.running, use_container_width=True,
+run_tts_only = b3.button("③ Giọng đọc", disabled=not video_ok or running_now, use_container_width=True,
                          help="Tổng hợp giọng đọc cho mọi đoạn đã có kịch bản — DỪNG trước khi ghép video.")
-run_full = b4.button("④ Hoàn tất", type="primary", disabled=not video_ok or st.session_state.running, use_container_width=True,
+run_full = b4.button("④ Hoàn tất", type="primary", disabled=not video_ok or running_now, use_container_width=True,
                      help="Ghép & xuất video hoàn chỉnh. Tự làm nốt mọi bước còn thiếu trước đó nếu cần.")
 
-if run_plan or run_script_only or run_tts_only or run_full:
-    st.session_state.running = True
-    st.session_state.result = None
+
+def _start_background(cfg: Config) -> None:
+    """Khởi động pipeline ở LUỒNG NỀN THỰC SỰ (background_jobs.py) — hàm này trả về NGAY, không chờ pipeline
+    chạy xong. Nhờ vậy Streamlit rerun bao nhiêu lần cũng không đụng tới luồng đang chạy thật (xem giải
+    thích đầy đủ trong background_jobs.py — đây chính là sửa lỗi "Lần chạy bị NGẮT giữa chừng" đã gặp)."""
     import long_video_pipeline
     from utils import setup_logging
-
-    stop_after = 0 if run_plan else (2 if run_script_only else (3 if run_tts_only else None))
-    cfg = build_cfg(stop_after=stop_after)
     cfg.workdir.mkdir(parents=True, exist_ok=True)
     setup_logging(cfg.log_path, st.session_state.verbose)
+    bg.clear_job(cfg.workdir)   # dọn job CŨ ĐÃ XONG (nếu có) — không xoá job đang chạy (start_job tự chặn việc đó)
 
-    status_box = st.status("Đang xử lý...", expanded=True)
-    chunk_bar = st.progress(0.0, text="")
+    def _run(job: bg.JobStatus) -> dict:
+        def on_step(n: int, title: str) -> None:
+            job.current_step = f"Bước {n} — {title}"
 
-    def on_step(n: int, title: str) -> None:
-        status_box.write(f"**Bước {n}** — {title}")
+        def on_chunk_progress(i: int, n: int) -> None:
+            job.chunk_progress = (i, n)
 
-    def on_chunk_progress(i: int, n: int) -> None:
-        chunk_bar.progress(i / n, text=f"Chunk {i}/{n}")
+        return long_video_pipeline.run(cfg, on_step=on_step, on_chunk_progress=on_chunk_progress,
+                                       interactive=False, cancel_event=job.cancel_event)
 
-    def _show_error_report(exc: Exception, context: str) -> None:
-        """Sinh báo cáo lỗi ĐẦY ĐỦ, hiện trong khung có nút copy sẵn của Streamlit (góc trên-phải khối mã)
-        — người dùng chỉ cần bấm copy, dán thẳng vào chat gửi Claude, không cần tự tìm log/traceback."""
-        report = build_error_report(exc, cfg, context=context)
-        saved = save_error_report(report, cfg)
-        st.markdown("**📋 Báo cáo lỗi (bấm biểu tượng copy ở góc khối bên dưới, dán thẳng vào chat để gửi):**")
-        st.code(report, language="text")
-        if saved:
-            st.caption(f"Đã lưu báo cáo vào: `{saved}` — vẫn tìm lại được nếu bạn lỡ đóng trang này.")
+    bg.start_job(cfg.workdir, _run, stop_after=cfg.stop_after)
 
+
+if run_plan or run_script_only or run_tts_only or run_full:
+    stop_after = 0 if run_plan else (2 if run_script_only else (3 if run_tts_only else None))
+    cfg = build_cfg(stop_after=stop_after)
     try:
-        t0 = time.perf_counter()
-        out = long_video_pipeline.run(cfg, on_step=on_step, on_chunk_progress=on_chunk_progress, interactive=False)
-        elapsed = time.perf_counter() - t0
-        stage_labels = {0: "Đã phân đoạn xong", 2: "Đã có kịch bản", 3: "Đã có giọng đọc"}
-        status_box.update(label=f"{stage_labels.get(stop_after, 'Hoàn tất')} trong {elapsed:.0f}s ✅", state="complete")
-        st.session_state.result = {"cfg_workdir": str(cfg.workdir), "output_dir": str(cfg.output_dir),
-                                   "script": str(out["script"]) if out["script"] else None,
-                                   "voiceover": str(out["voiceover"]) if out["voiceover"] else None,
-                                   "video": str(out["video"]) if out["video"] else None,
-                                   "log": cfg.log_path.read_text(encoding="utf-8", errors="replace") if cfg.log_path.is_file() else ""}
-        if stop_after is not None:
-            st.info("Dừng đúng theo giai đoạn đã chọn. Xem lại bảng tiến độ ở mục ③ (tải lại trang hoặc bấm "
-                    "lại một nút bất kỳ để cập nhật bảng), rồi bấm nút giai đoạn tiếp theo khi sẵn sàng.")
-    except (WebAuthError, GeminiWebError) as e:
-        status_box.update(label="Cần đăng nhập lại", state="error")
-        st.error(f"{e}\n\nHãy đăng nhập lại ở mục ① phía trên rồi chạy lại — chỉ cần bấm lại ĐÚNG nút vừa "
-                "chạy, không cần làm lại các chunk đã xong trước đó.")
-        _show_error_report(e, "Lỗi đăng nhập/phiên Gemini Web")
-    except PipelineError as e:
-        status_box.update(label="Có lỗi xảy ra", state="error")
-        st.error(f"{e}\n\nBấm lại ĐÚNG nút vừa chạy để tiếp tục từ chỗ dở dang — không cần làm lại từ đầu.")
-        _show_error_report(e, "Lỗi trong pipeline (PipelineError)")
-    except Exception as e:  # noqa: BLE001
-        status_box.update(label="Lỗi không lường trước", state="error")
-        st.exception(e)
-        _show_error_report(e, "Lỗi không lường trước (Exception)")
-    except BaseException as e:  # noqa: BLE001 — gồm RerunException/StopException của Streamlit, KeyboardInterrupt...
-        # Lần chạy bị NGẮT giữa chừng (không phải lỗi): thường do thao tác trên giao diện khi đang chạy (Streamlit
-        # ngắt lần chạy hiện tại để chạy lại trang) hoặc đóng trang. Trước đây KHÔNG để lại dấu vết nào trong log
-        # nên log chỉ dừng im lặng giữa chừng; giờ ghi rõ để báo cáo chẩn đoán cho thấy nguyên nhân.
-        logging.getLogger("svvc.gui").warning(
-            "Lần chạy bị NGẮT giữa chừng bởi %s (thường do bấm nút/thao tác trên giao diện khi đang chạy, hoặc đóng "
-            "trang). Bấm lại đúng nút để tiếp tục — phần đã xong được giữ nguyên.", type(e).__name__)
-        raise
-    finally:
-        st.session_state.running = False
+        _start_background(cfg)
+    except RuntimeError as e:                      # đã có job khác đang chạy CHO ĐÚNG workdir này (hiếm khi xảy
+        st.warning(str(e))                          # ra vì nút đã bị khoá lúc running_now=True, nhưng vẫn chặn an toàn)
+    st.rerun()
 
 # ════════════════════════════════════════════════════════════
-# Kết quả
+# Trạng thái / Kết quả — ĐỌC TỪ JOB NỀN (không phải biến cục bộ của một lần chạy blocking như trước) — nên
+# LUÔN hiển thị đúng, kể cả khi bạn vừa mở lại trang trong lúc job vẫn đang chạy nền từ trước.
 # ════════════════════════════════════════════════════════════
-result = st.session_state.result
-if result:
+if current_job is not None:
     st.divider()
-    st.subheader("⑤ Kết quả")
-    if result["video"] and Path(result["video"]).is_file():
-        left, right = st.columns([3, 2])
-        with left:
-            st.video(result["video"])
-            st.download_button("⬇️ Tải video đã thuyết minh", Path(result["video"]).read_bytes(),
-                               Path(result["video"]).name, "video/mp4")
-        with right:
-            if result["voiceover"] and Path(result["voiceover"]).is_file():
-                st.download_button("⬇️ Tải final_voiceover.mp3", Path(result["voiceover"]).read_bytes(),
-                                   Path(result["voiceover"]).name, "audio/mpeg")
-            if result["script"] and Path(result["script"]).is_file():
-                st.download_button("⬇️ Tải script.json", Path(result["script"]).read_bytes(),
-                                   Path(result["script"]).name, "application/json")
-    elif result["script"] and Path(result["script"]).is_file():
-        st.info("Đã tạo xong kịch bản. Mở file, sửa nếu cần, rồi bấm '🚀 Tạo video thuyết minh' để chạy tiếp "
-               "(sẽ tự dùng lại kịch bản này, không tốn công gọi lại Gemini).")
-        st.download_button("⬇️ Tải script.json để xem/sửa", Path(result["script"]).read_bytes(),
-                           Path(result["script"]).name, "application/json")
-        st.json(__import__("json").loads(Path(result["script"]).read_text(encoding="utf-8")), expanded=False)
-    st.caption(f"Thư mục kết quả: `{result['output_dir']}` — thư mục làm việc/log: `{result['cfg_workdir']}`")
-    with st.expander("Nhật ký chi tiết"):
-        st.code(result["log"], language="text")
+    st.subheader("⑤ Trạng thái / Kết quả")
+    stage_labels = {0: "phân đoạn", 2: "kịch bản", 3: "giọng đọc", None: "hoàn tất"}
+    label = stage_labels.get(current_job.stop_after, "hoàn tất")
+
+    if current_job.state == "running":
+        st.info(f"🟢 Đang chạy ({label})... {current_job.current_step}")
+        if current_job.chunk_progress:
+            i, n = current_job.chunk_progress
+            st.progress(i / max(n, 1), text=f"Chunk {i}/{n}")
+        st.caption(f"Đã chạy {current_job.elapsed_sec:.0f}s. Trang này KHÔNG cần mở/để yên — pipeline vẫn "
+                  "tiếp tục chạy nền dù bạn đóng trang hay tắt trình duyệt (chỉ dừng nếu tắt hẳn ứng dụng).")
+        c1, c2, c3 = st.columns([1, 1, 2])
+        if c1.button("🔄 Cập nhật tiến độ"):
+            st.rerun()
+        if c2.button("⏹ Dừng"):
+            bg.request_cancel(preview_cfg.workdir)
+            st.info("Đã gửi yêu cầu dừng — sẽ dừng ở ranh giới chunk gần nhất (không dừng giữa chừng một "
+                    "thao tác đang làm dở). Bấm 'Cập nhật tiến độ' sau vài giây để xem đã dừng hẳn chưa.")
+        if c3.checkbox("Tự động cập nhật mỗi 3 giây", key="auto_refresh"):
+            time.sleep(3)
+            st.rerun()
+
+    elif current_job.state == "cancelled":
+        st.warning("⏹ Đã dừng theo yêu cầu. Phần đã xong được giữ nguyên trong checkpoint — bấm 'Tiếp tục' "
+                  "để chạy nốt phần còn lại, không mất gì đã làm.")
+        if st.button("▶️ Tiếp tục", type="primary"):
+            cfg2 = build_cfg(stop_after=current_job.stop_after)
+            try:
+                _start_background(cfg2)
+            except RuntimeError as e:
+                st.warning(str(e))
+            st.rerun()
+
+    elif current_job.state == "error":
+        st.error("Có lỗi xảy ra. Bấm 'Tiếp tục' để thử lại ĐÚNG chỗ dở dang — không cần làm lại từ đầu.")
+        report = build_error_report(None, preview_cfg, context=f"Lỗi khi chạy nền ({label})",
+                                    extra={"loại lỗi (chi tiết ở dưới)": (current_job.error or "").splitlines()[0] if current_job.error else "?"})
+        if current_job.error:
+            report = report.rstrip("`\n") + "\n\nTraceback từ luồng nền:\n" + current_job.error + "\n```"
+        st.code(report, language="text")
+        saved = save_error_report(report, preview_cfg)
+        if saved:
+            st.caption(f"Đã lưu vào: `{saved}`")
+        if st.button("▶️ Tiếp tục", type="primary"):
+            cfg2 = build_cfg(stop_after=current_job.stop_after)
+            try:
+                _start_background(cfg2)
+            except RuntimeError as e:
+                st.warning(str(e))
+            st.rerun()
+
+    elif current_job.state == "done":
+        result = current_job.result or {}
+        out_dir, workdir = str(preview_cfg.output_dir), str(preview_cfg.workdir)
+        video, voiceover, script = result.get("video"), result.get("voiceover"), result.get("script")
+        if video and Path(video).is_file():
+            left, right = st.columns([3, 2])
+            with left:
+                st.video(str(video))
+                st.download_button("⬇️ Tải video đã thuyết minh", Path(video).read_bytes(), Path(video).name, "video/mp4")
+            with right:
+                if voiceover and Path(voiceover).is_file():
+                    st.download_button("⬇️ Tải final_voiceover.mp3", Path(voiceover).read_bytes(),
+                                       Path(voiceover).name, "audio/mpeg")
+                if script and Path(script).is_file():
+                    st.download_button("⬇️ Tải script.json", Path(script).read_bytes(), Path(script).name, "application/json")
+        elif script and Path(script).is_file():
+            st.info("Đã tạo xong kịch bản. Mở file, sửa nếu cần, rồi bấm '④ Hoàn tất' để chạy tiếp (sẽ tự "
+                   "dùng lại kịch bản này, không tốn công gọi lại Gemini).")
+            st.download_button("⬇️ Tải script.json để xem/sửa", Path(script).read_bytes(), Path(script).name, "application/json")
+            import json as _json
+            st.json(_json.loads(Path(script).read_text(encoding="utf-8")), expanded=False)
+        else:
+            st.info(f"Đã dừng đúng theo giai đoạn đã chọn ({label}). Bấm nút giai đoạn tiếp theo khi sẵn sàng.")
+        st.caption(f"Thư mục kết quả: `{out_dir}` — thư mục làm việc/log: `{workdir}`")
+        with st.expander("Nhật ký chi tiết"):
+            log_path = preview_cfg.log_path
+            st.code(log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else "(chưa có log)",
+                    language="text")
+

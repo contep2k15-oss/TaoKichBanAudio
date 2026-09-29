@@ -39,7 +39,7 @@ from engines.base import BaseVisionEngine
 from script_generator import ScriptSegment
 from silence_detector import detect_silences
 from tts_engine import TTSResult
-from utils import MediaInfo, PipelineError, banner, check_binaries, probe_media, read_json, write_json
+from utils import MediaInfo, PipelineCancelled, PipelineError, banner, check_binaries, probe_media, read_json, write_json
 from video_processor import FrameSample
 
 log = logging.getLogger("svvc.long_video")
@@ -401,12 +401,20 @@ def _resolve_youtube_source(cfg: Config, *, interactive: bool | None, need_video
 # Điểm vào
 # ════════════════════════════════════════════════════════════
 def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = None,
-        on_step: Callable[[int, str], None] | None = None, interactive: bool | None = None
-        ) -> dict[str, Path | None]:
+        on_step: Callable[[int, str], None] | None = None, interactive: bool | None = None,
+        cancel_event: threading.Event | None = None) -> dict[str, Path | None]:
     """`interactive`: có cho phép hỏi lại người dùng qua `input()` khi phiên Gemini Web hết hạn hay không.
     Mặc định (`None`) tự dò qua `sys.stdin` — đúng khi chạy CLI thật. Giao diện GUI (app_streamlit.py) LUÔN
     truyền `interactive=False` tường minh, vì nó có luồng đăng nhập RIÊNG bằng nút bấm, không được gọi
-    `input()` (sẽ treo/lỗi vì không có console để nhập)."""
+    `input()` (sẽ treo/lỗi vì không có console để nhập).
+    `cancel_event`: khi được truyền vào (từ nút "Dừng" trên GUI, xem background_jobs.py) và bị set() giữa
+    chừng, pipeline dừng lại ở RANH GIỚI GIỮA 2 CHUNK gần nhất (không dừng giữa chừng một thao tác đang làm
+    dở, vd giữa lúc FFmpeg đang mã hoá) bằng cách ném PipelineCancelled — phần đã xong vẫn giữ nguyên trong
+    checkpoint, không mất gì."""
+    def _check_cancel() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise PipelineCancelled("Đã dừng theo yêu cầu — phần đã xong được giữ nguyên trong checkpoint.")
+
     youtube_segments: list[ScriptSegment] | None = None
     if cfg.youtube_url:
         # LƯU Ý: KHÔNG kiểm tra "video_path vừa có vừa có youtube_url" ở đây — việc đó đã kiểm tra MỘT LẦN
@@ -474,6 +482,7 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
     is_long = len(chunks) > 1
     log.info("%s %s", f"Video DÀI: chia thành {len(chunks)} macro-chunk." if is_long else
              "Video ngắn hơn ngưỡng chia chunk → xử lý như 1 chunk duy nhất.", checkpoint.resume_summary(len(chunks)))
+    _check_cancel()  # ngay sau highlight+phân đoạn — không phải đợi tới hết vòng lặp chunk mới nhận ra đã bị yêu cầu dừng
 
     outputs: dict[str, Path | None] = {"script": None, "voiceover": None, "video": None}
     if cfg.stop_after == 0:                              # chỉ muốn xem kế hoạch chia chunk, chưa gọi Gemini/TTS
@@ -512,6 +521,7 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
             segments_by_chunk = []
             story_hook: str | None = None   # "fantasy_inspiring": câu chuyện mở đầu, mang xuyên suốt mọi chunk
             for chunk in chunks:
+                _check_cancel()
                 if checkpoint.has(chunk.index, Stage.SCRIPT):
                     log.info("Chunk #%d/%d: kịch bản đã có (RESUME) → bỏ qua.", chunk.index + 1, len(chunks))
                     segs = [_segment_from_dict(d) for d in checkpoint.load(chunk.index, Stage.SCRIPT)["segments"]]
@@ -543,6 +553,7 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
     tts = get_tts_engine(cfg)
     chunk_audio_paths: list[Path] = []
     for chunk, segs in zip(chunks, segments_by_chunk):
+        _check_cancel()
         if checkpoint.chunk_done(chunk.index):
             log.info("Chunk #%d/%d: audio đã ghép xong (RESUME) → bỏ qua.", chunk.index + 1, len(chunks))
         else:

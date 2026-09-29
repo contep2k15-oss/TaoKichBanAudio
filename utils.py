@@ -23,6 +23,11 @@ class PipelineError(Exception):
     """Lỗi gốc của pipeline — main.py bắt lỗi này và in thông báo thân thiện."""
 
 
+class PipelineCancelled(PipelineError):
+    """Người dùng chủ động yêu cầu dừng (nút "Dừng" trên GUI) — KHÁC lỗi thật: phần đã xong vẫn được giữ
+    nguyên trong checkpoint, chạy lại (nút "Tiếp tục") sẽ tự tiếp tục đúng chỗ dừng, không mất gì."""
+
+
 class MediaToolError(PipelineError):
     """FFmpeg / ffprobe / OpenCV lỗi hoặc không tìm thấy."""
 
