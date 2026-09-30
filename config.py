@@ -10,6 +10,53 @@ DEFAULT_GEMINI_URL = "https://gemini.google.com/app?hl=en"   # ?hl=en: ép giao 
 DEFAULT_PROFILE_DIR = Path.home() / ".silent_video_voiceover" / "gemini_profile"
 
 DEFAULT_VOICES = {"vi": "vi-VN-HoaiMyNeural", "en": "en-US-AriaNeural"}
+
+# Danh mục giọng Edge-TTS để GUI hiện dropdown thân thiện (tên hiển thị + giới tính), thay vì bắt gõ tay
+# voice_id kỹ thuật. CHỈ áp dụng cho engine Edge-TTS — ElevenLabs không có danh mục cố định công khai (phụ
+# thuộc tài khoản người dùng), giữ nguyên ô nhập tay cho engine đó.
+#
+# LƯU Ý: sandbox phát triển dự án này không có mạng để gọi `edge_tts.list_voices()` xác thực trực tiếp —
+# các voice_id dưới đây lấy theo danh sách chuẩn, ổn định nhiều năm của Microsoft. Trước khi dùng thật, nên
+# tự đối chiếu 1 lần bằng lệnh có sẵn của chính thư viện: `edge-tts --list-voices | grep -E "vi-VN|en-"`.
+#
+# Tiếng Việt: Edge-TTS CHỈ có đúng 2 giọng chính thức (không có giọng theo vùng miền Bắc/Trung/Nam — đây là
+# giới hạn thật của dịch vụ, không phải thiếu sót của tool). Tiếng Anh: 10 giọng, trải đều Mỹ/Anh/Úc/Ấn Độ,
+# cả nam lẫn nữ, để chọn theo cả giới tính lẫn vùng miền.
+def resolve_voice_choice(language: str, gender: str | None, current_voice_id: str | None
+                         ) -> tuple[list[str], str, list[tuple[str, str]], str]:
+    """Thuật toán THUẦN (không đụng Streamlit) chọn ra: (danh sách giới tính, giới tính đang áp dụng, danh
+    sách (label, voice_id) đúng giới tính đó, voice_id cuối cùng nên dùng) — cho một `language` + lựa chọn
+    `gender` + `current_voice_id` hiện có (có thể None/rỗng/thuộc ngôn ngữ khác, đều phải tự sửa về hợp lệ).
+    Tách riêng khỏi app_streamlit.py để test được bằng Python thuần, không phụ thuộc/bị giới hạn bởi cách
+    Streamlit's AppTest quản lý trạng thái widget qua nhiều lượt render (đã xác nhận có giới hạn riêng)."""
+    catalog = VOICE_CATALOG[language]
+    genders = sorted({g for _, g, _ in catalog}, reverse=True)      # "Nữ" trước "Nam", ổn định thứ tự
+    chosen_gender = gender if gender in genders else genders[0]
+    options = [(label, vid) for label, g, vid in catalog if g == chosen_gender]
+    ids = {vid for _, vid in options}
+    final_voice = current_voice_id if current_voice_id in ids else options[0][1]
+    return genders, chosen_gender, options, final_voice
+
+
+VOICE_CATALOG: dict[str, list[tuple[str, str, str]]] = {
+    # (tên hiển thị, giới tính, voice_id)
+    "vi": [
+        ("Hoài My — Nữ (mặc định)", "Nữ", "vi-VN-HoaiMyNeural"),
+        ("Nam Minh — Nam", "Nam", "vi-VN-NamMinhNeural"),
+    ],
+    "en": [
+        ("Aria — Nữ, Mỹ (mặc định)", "Nữ", "en-US-AriaNeural"),
+        ("Jenny — Nữ, Mỹ (ấm áp, trò chuyện)", "Nữ", "en-US-JennyNeural"),
+        ("Guy — Nam, Mỹ", "Nam", "en-US-GuyNeural"),
+        ("Davis — Nam, Mỹ (trầm ấm)", "Nam", "en-US-DavisNeural"),
+        ("Christopher — Nam, Mỹ (trầm, phong cách tài liệu)", "Nam", "en-US-ChristopherNeural"),
+        ("Sonia — Nữ, Anh (British)", "Nữ", "en-GB-SoniaNeural"),
+        ("Ryan — Nam, Anh (British)", "Nam", "en-GB-RyanNeural"),
+        ("Natasha — Nữ, Úc", "Nữ", "en-AU-NatashaNeural"),
+        ("William — Nam, Úc", "Nam", "en-AU-WilliamNeural"),
+        ("Neerja — Nữ, Ấn Độ (English India)", "Nữ", "en-IN-NeerjaNeural"),
+    ],
+}
 LANGUAGE_NAMES = {"vi": "tiếng Việt", "en": "English"}
 DEFAULT_WORDS_PER_SEC = {"vi": 3.2, "en": 2.5}      # "từ" tiếng Việt = tiếng (âm tiết) tách bằng khoảng trắng
 
@@ -77,7 +124,9 @@ class Config:
 
     # ── Ghép & mux ────────────────────────────────────────
     keep_bgm: bool = True
-    bgm_duck_ratio: float = 0.7
+    bgm_duck_ratio: float = 0.15   # âm lượng gốc còn lại khi có giọng đọc — mặc định hạ MẠNH (85%) vì phần lớn
+                                    # video nguồn có LỜI THUYẾT MINH thật (không chỉ nhạc nền); nếu nguồn của bạn
+                                    # chỉ có nhạc nền thuần, có thể tăng lên (vd 0.5-0.7) để giữ không khí nhạc nền.
     duck_ramp_ms: int = 80
     voice_gain_db: float = 0.0
     audio_bitrate: str = "192k"

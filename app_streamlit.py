@@ -12,7 +12,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from config import DEFAULT_GEMINI_MODEL, Config
+from config import DEFAULT_GEMINI_MODEL, Config, resolve_voice_choice
 from error_report import build_error_report, save_error_report
 from utils import GeminiWebError, suppress_console_windows
 
@@ -29,10 +29,14 @@ DEFAULTS = {
     "narrator_pov": "", "narrative_style": "natural",
     "elevenlabs_api_key": "", "elevenlabs_model": "eleven_multilingual_v2",
     "mode": "interval", "interval": 2.5, "scene_threshold": 0.35,
-    "chunk_minutes": 4.0, "bgm_duck": 0.7, "no_bgm": False, "max_speedup": 1.25,
+    "chunk_minutes": 4.0,
+    "bgm_duck": 0.15,   # khớp mặc định mới của Config.bgm_duck_ratio (hạ mạnh vì đa số nguồn có lời thuyết minh, không chỉ nhạc nền)
+    "no_bgm": False, "max_speedup": 1.25,
     "pause_range": (0.3, 1.2), "max_advance": 0.0,
     "highlight_mode": False, "highlight_target_ratio": 0.4, "highlight_frame_interval": 6.0,
     "force": False, "verbose": False, "chrome_proc": None,
+    "voice_gender_select": "Nữ", "voice_specific_select": "vi-VN-HoaiMyNeural",   # seed VÔ ĐIỀU KIỆN ở đây (không phải bên trong nhánh if tts_engine=="edge")
+    # để tránh lỗi Streamlit "widget key chưa khởi tạo" khi widget này bị ẩn (đổi engine) rồi hiện lại.
 }
 for k, v in DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -112,7 +116,30 @@ with st.sidebar:
     st.session_state.tts_engine = st.radio("TTS engine", ["edge", "elevenlabs"], horizontal=True,
                                            format_func=lambda x: "Edge-TTS (miễn phí)" if x == "edge" else "ElevenLabs (trả phí)")
     st.session_state.language = st.selectbox("Ngôn ngữ", ["vi", "en"])
-    st.session_state.voice = st.text_input("Giọng (để trống = mặc định)", st.session_state.voice)
+    if st.session_state.tts_engine == "edge":
+        genders, gender_default, _, _ = resolve_voice_choice(
+            st.session_state.language, st.session_state.get("voice_gender_select"), st.session_state.voice)
+        if st.session_state.get("voice_gender_select") not in genders:      # chỉ ép khi KHÔNG hợp lệ — tuyệt
+            st.session_state.voice_gender_select = gender_default           # đối không ép vô điều kiện, kẻo
+        col_g, col_v = st.columns(2)                                        # ghi đè mất lựa chọn vừa bấm
+        gender = col_g.selectbox("Giới tính", genders, key="voice_gender_select")
+
+        _, _, options, voice_default = resolve_voice_choice(st.session_state.language, gender, st.session_state.voice)
+        ids = [vid for _, vid in options]
+        if st.session_state.voice not in ids:
+            st.session_state.voice = voice_default
+        if st.session_state.get("voice_specific_select") not in ids:
+            st.session_state.voice_specific_select = st.session_state.voice
+        label_by_id = dict((vid, label) for label, vid in options)
+        chosen = col_v.selectbox("Giọng cụ thể", ids, format_func=lambda vid: label_by_id[vid], key="voice_specific_select")
+        st.session_state.voice = chosen
+        if st.session_state.language == "vi":
+            st.caption("Edge-TTS tiếng Việt chỉ có đúng 2 giọng chính thức (không phân theo vùng miền — "
+                      "giới hạn thật của dịch vụ, không phải thiếu sót của tool).")
+    else:
+        st.session_state.voice = st.text_input(
+            "Voice ID (ElevenLabs — lấy từ tài khoản của bạn tại elevenlabs.io, mục Voices)",
+            st.session_state.voice, placeholder="vd 9BWtsMINqrJLrRacOk9x")
     if st.session_state.tts_engine == "elevenlabs":
         st.session_state.elevenlabs_api_key = st.text_input("ElevenLabs API key", st.session_state.elevenlabs_api_key, type="password")
         st.session_state.elevenlabs_model = st.text_input("ElevenLabs model", st.session_state.elevenlabs_model)
@@ -167,7 +194,9 @@ with st.sidebar:
                  "trống tự nhiên đã có giữa 2 câu, không bao giờ thêm khoảng lặng mới.")
         st.session_state.no_bgm = st.checkbox("Bỏ hẳn âm thanh gốc", st.session_state.no_bgm)
         if not st.session_state.no_bgm:
-            st.session_state.bgm_duck = st.slider("Âm lượng nhạc nền khi có giọng đọc", 0.1, 1.0, st.session_state.bgm_duck, 0.05)
+            st.session_state.bgm_duck = st.slider("Âm lượng gốc khi có giọng đọc", 0.0, 1.0, st.session_state.bgm_duck, 0.05,
+                                       help="Mặc định hạ MẠNH (0.15) vì đa số video nguồn có LỜI THUYẾT MINH thật, "
+                                            "không chỉ nhạc nền — để cao (vd 0.5-0.7) chỉ khi bạn CHẮC nguồn chỉ có nhạc nền thuần.")
         st.session_state.output_dir = st.text_input("Thư mục kết quả (để trống = tự đặt theo tên video)", st.session_state.output_dir)
         st.session_state.force = st.checkbox("Bỏ qua checkpoint, làm lại từ đầu (--force)", st.session_state.force)
         st.session_state.verbose = st.checkbox("Log chi tiết (DEBUG)", st.session_state.verbose)
@@ -264,6 +293,34 @@ else:
 
 st.divider()
 
+import background_jobs as bg  # noqa: E402
+
+
+def _start_background(cfg: Config) -> None:
+    """Khởi động pipeline ở LUỒNG NỀN THỰC SỰ (background_jobs.py) — hàm này trả về NGAY, không chờ pipeline
+    chạy xong. Nhờ vậy Streamlit rerun bao nhiêu lần cũng không đụng tới luồng đang chạy thật (xem giải
+    thích đầy đủ trong background_jobs.py — đây chính là sửa lỗi "Lần chạy bị NGẮT giữa chừng" đã gặp).
+    ĐẶT TRƯỚC mục ③ (không phải chỉ ở mục ④): nút "Tiếp tục" ở mục ③ cũng cần gọi được hàm này — Python đọc
+    file từ trên xuống, nên định nghĩa gì cũng phải nằm TRƯỚC nơi dùng nó trong cùng một lần chạy script."""
+    import long_video_pipeline
+    from utils import setup_logging
+    cfg.workdir.mkdir(parents=True, exist_ok=True)
+    setup_logging(cfg.log_path, st.session_state.verbose)
+    bg.clear_job(cfg.workdir)   # dọn job CŨ ĐÃ XONG (nếu có) — không xoá job đang chạy (start_job tự chặn việc đó)
+
+    def _run(job: bg.JobStatus) -> dict:
+        def on_step(n: int, title: str) -> None:
+            job.current_step = f"Bước {n} — {title}"
+
+        def on_chunk_progress(i: int, n: int) -> None:
+            job.chunk_progress = (i, n)
+
+        return long_video_pipeline.run(cfg, on_step=on_step, on_chunk_progress=on_chunk_progress,
+                                       interactive=False, cancel_event=job.cancel_event)
+
+    bg.start_job(cfg.workdir, _run, stop_after=cfg.stop_after)
+
+
 # ════════════════════════════════════════════════════════════
 # Khu vực 3: trạng thái hiện có (đọc, KHÔNG chạy gì) — biết ngay đang xử lý tới đâu trước khi bấm nút nào
 # ════════════════════════════════════════════════════════════
@@ -286,8 +343,20 @@ if video_ok:
                 "Giọng đọc": "✅" if c.has(pipeline_status.Stage.TTS) else "—",
                 "Đã ghép": "✅" if c.has(pipeline_status.Stage.ASSEMBLED) else "—"} for c in status.chunks]
         st.dataframe(rows, hide_index=True, use_container_width=True)
-        st.caption("Bảng này chỉ để XEM — không chạy gì. Bấm nút giai đoạn còn thiếu ở mục ④ bên dưới để tiếp tục "
-                  "đúng chỗ dở dang, không cần làm lại từ đầu.")
+        if status.n_done < status.n_total:
+            _peek_job = bg.get_job(cfg_peek.workdir)
+            _dang_chay = _peek_job is not None and _peek_job.state == "running"
+            st.caption("Đã có tiến độ dở dang — CHỈ CẦN bấm nút dưới đây để làm tiếp phần còn thiếu, không cần "
+                      "tự chọn xem còn thiếu bước nào, không làm lại phần đã xong. Dùng được ngay cả khi bạn "
+                      "vừa mở lại app (đóng hẳn rồi mở lại) — tiến độ này đọc thẳng từ đĩa, không phụ thuộc "
+                      "việc app có vừa bị đóng hay không.")
+            if st.button("▶️ Tiếp tục đến khi xong", type="primary", disabled=_dang_chay, key="continue_from_status"):
+                cfg_continue = build_cfg(stop_after=None)
+                try:
+                    _start_background(cfg_continue)
+                except RuntimeError as e:
+                    st.warning(str(e))
+                st.rerun()
         st.divider()
 
 # ════════════════════════════════════════════════════════════
@@ -328,29 +397,6 @@ run_tts_only = b3.button("③ Giọng đọc", disabled=not video_ok or running_
                          help="Tổng hợp giọng đọc cho mọi đoạn đã có kịch bản — DỪNG trước khi ghép video.")
 run_full = b4.button("④ Hoàn tất", type="primary", disabled=not video_ok or running_now, use_container_width=True,
                      help="Ghép & xuất video hoàn chỉnh. Tự làm nốt mọi bước còn thiếu trước đó nếu cần.")
-
-
-def _start_background(cfg: Config) -> None:
-    """Khởi động pipeline ở LUỒNG NỀN THỰC SỰ (background_jobs.py) — hàm này trả về NGAY, không chờ pipeline
-    chạy xong. Nhờ vậy Streamlit rerun bao nhiêu lần cũng không đụng tới luồng đang chạy thật (xem giải
-    thích đầy đủ trong background_jobs.py — đây chính là sửa lỗi "Lần chạy bị NGẮT giữa chừng" đã gặp)."""
-    import long_video_pipeline
-    from utils import setup_logging
-    cfg.workdir.mkdir(parents=True, exist_ok=True)
-    setup_logging(cfg.log_path, st.session_state.verbose)
-    bg.clear_job(cfg.workdir)   # dọn job CŨ ĐÃ XONG (nếu có) — không xoá job đang chạy (start_job tự chặn việc đó)
-
-    def _run(job: bg.JobStatus) -> dict:
-        def on_step(n: int, title: str) -> None:
-            job.current_step = f"Bước {n} — {title}"
-
-        def on_chunk_progress(i: int, n: int) -> None:
-            job.chunk_progress = (i, n)
-
-        return long_video_pipeline.run(cfg, on_step=on_step, on_chunk_progress=on_chunk_progress,
-                                       interactive=False, cancel_event=job.cancel_event)
-
-    bg.start_job(cfg.workdir, _run, stop_after=cfg.stop_after)
 
 
 if run_plan or run_script_only or run_tts_only or run_full:
