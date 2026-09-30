@@ -410,11 +410,34 @@ def validate_and_fix(segments: list[ScriptSegment], cfg: Config, video_duration:
     return fixed
 
 
+def _looks_missing_diacritics(text: str, language: str) -> bool:
+    """Heuristic: chữ tiếng Việt có dấu (thanh + nguyên âm) chiếm tỷ lệ đáng kể trong văn bản tiếng Việt bình
+    thường — nếu một câu chỉ toàn chữ cái ASCII trơn (không "à/á/ả/ã/ạ", "ă/â", "ê", "ô/ơ", "ư", "đ"...) thì
+    gần như chắc chắn đã BỊ MẤT DẤU (không phải văn bản tiếng Việt hợp lệ), dù ngữ pháp/từ vựng vẫn đúng.
+    Chỉ áp dụng khi `language == "vi"` — ngôn ngữ khác không có khái niệm "dấu" này."""
+    if language != "vi" or not text:
+        return False
+    letters = [c for c in text.lower() if c.isalpha()]
+    if len(letters) < 6:            # câu quá ngắn, không đủ tin cậy để kết luận
+        return False
+    co_dau = sum(1 for c in letters if c in _VI_DIACRITIC_CHARS)
+    return co_dau / len(letters) < 0.08     # hiệu chỉnh từ số liệu thật (câu tiếng Việt bình thường, kể cả
+    # câu rất ngắn, luôn ≥ ~13% chữ mang dấu; câu mất dấu HOÀN TOÀN = 0%). LƯU Ý: câu mất dấu NỬA CHỪNG (chỉ
+    # một phần câu bị mất, phần còn lại vẫn có dấu — từng gặp thật) có thể có tỷ lệ nằm ngay sát vùng bình
+    # thường (đo được ~14%), heuristic đơn giản này KHÔNG tách bạch được hoàn toàn trường hợp đó — chỉ chắc
+    # chắn bắt được trường hợp phổ biến hơn nhiều: mất dấu HOÀN TOÀN cả câu.
+
+
+_VI_DIACRITIC_CHARS = set("àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ")
+
+
 def _shorten(driver: Any, too_long: list[ScriptSegment], cfg: Config, round_no: int) -> None:
     payload = [{"id": s.id, "duration_sec": round(s.duration_sec, 2), "max_words": max_words_for(s, cfg), "text": s.text}
                for s in too_long]
     prompt = (f"Bạn là biên tập viên lồng tiếng. Rút gọn TỪNG lời thuyết minh ({cfg.language_name}) dưới đây sao cho số từ ≤ max_words, "
-              "giữ ý chính, văn nói tự nhiên, không đổi ngôn ngữ, không thêm ký hiệu.\n"
+              "giữ ý chính, văn nói tự nhiên, không đổi ngôn ngữ, không thêm ký hiệu. "
+              "BẮT BUỘC viết ĐẦY ĐỦ DẤU THANH VÀ DẤU NGUYÊN ÂM tiếng Việt như bình thường "
+              "(vd 'giữa đại ngàn' — TUYỆT ĐỐI KHÔNG được bỏ dấu, KHÔNG viết kiểu không dấu 'giua dai ngan').\n"
               'Chỉ trả về MỘT khối mã ```json ... ``` chứa mảng [{"id": <id>, "text": "<lời đã rút gọn>"}] cho đúng các id sau:\n'
               f"```json\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n```")
     raw = driver.ask_json(prompt, [], label=f"shorten-{round_no}")
@@ -425,8 +448,16 @@ def _shorten(driver: Any, too_long: list[ScriptSegment], cfg: Config, round_no: 
         except (TypeError, ValueError, AttributeError):
             continue
         new_text = clean_text(item.get("text"))
-        if seg and new_text and count_words(new_text) < count_words(seg.text):
-            seg.text = new_text
+        if not (seg and new_text and count_words(new_text) < count_words(seg.text)):
+            continue
+        if _looks_missing_diacritics(new_text, cfg.language):
+            # Bản rút gọn bị THIẾU DẤU — KHÔNG dùng (thà câu dài, sau này bị ép tốc độ đọc nhanh hơn, còn hơn
+            # đọc sai hẳn tiếng Việt). Giữ nguyên `seg.text` cũ, để lần sau (vòng rút gọn kế, hoặc bước cắt
+            # cứng `_truncate_words` cuối cùng) xử lý tiếp.
+            log.warning("Đoạn %d: bản rút gọn từ Gemini bị THIẾU DẤU tiếng Việt (%r) → bỏ qua, giữ câu dài.",
+                       seg.id, new_text[:60])
+            continue
+        seg.text = new_text
 
 
 def _truncate_words(text: str, limit: int) -> str:
