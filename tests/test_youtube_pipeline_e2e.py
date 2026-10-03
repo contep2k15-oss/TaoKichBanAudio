@@ -57,7 +57,7 @@ def fake_reply(req: dict) -> str:
         return "```json\n" + json.dumps(segs, ensure_ascii=False) + "\n```"
     # prompt dựa trên ẢNH (đường cũ, chậm) — KHÔNG được xuất hiện trong luồng YouTube
     counts["frame"] += 1
-    stamps = [parse_timestamp(m) for m in re.findall(r"Ảnh \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
+    stamps = [parse_timestamp(m) for m in re.findall(r"Image \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
     segs = [{"id": k, "start_time": format_timestamp(t - 0.4), "end_time": format_timestamp(t + 0.4),
             "text": "một hai ba bốn", "tone": "vui ve"} for k, t in enumerate(stamps, start=1)]
     return "```json\n" + json.dumps(segs, ensure_ascii=False) + "\n```"

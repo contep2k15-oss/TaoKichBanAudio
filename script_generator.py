@@ -53,6 +53,11 @@ class ScriptSegment:
     end_sec: float
     text: str
     tone: str = "trung tinh"
+    certainty: str = "observed_fact"   # "observed_fact" | "safe_inference" | "creative_framing" |
+                                       # "user_provided_fact" — THÊM Ở CUỐI (có giá trị mặc định) để KHÔNG
+                                       # phá các lời gọi ScriptSegment(id, start, end, text, tone) đã có khắp
+                                       # codebase theo kiểu tham số vị trí. Mặc định "observed_fact" (mức
+                                       # chặt nhất) khi không rõ — an toàn hơn là mặc định mức lỏng.
 
     @property
     def duration_sec(self) -> float:
@@ -60,7 +65,8 @@ class ScriptSegment:
 
     def to_json(self) -> dict[str, Any]:
         return {"id": self.id, "start_time": format_timestamp(self.start_sec), "end_time": format_timestamp(self.end_sec),
-                "duration_sec": round(self.duration_sec, 3), "text": self.text, "tone": self.tone}
+                "duration_sec": round(self.duration_sec, 3), "text": self.text, "tone": self.tone,
+                "certainty": self.certainty}
 
 
 _MD_RE = re.compile(r"[*_`#>~]+")
@@ -69,6 +75,18 @@ _EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]")
 
 def clean_text(text: Any) -> str:
     return " ".join(_EMOJI_RE.sub("", _MD_RE.sub("", str(text or ""))).split())
+
+
+CERTAINTY_LEVELS = ("observed_fact", "safe_inference", "creative_framing", "user_provided_fact")
+
+
+def normalize_certainty(raw: Any) -> str:
+    """Chuẩn hoá nhãn `certainty` Gemini trả về — khác `normalize_tone()` ở chỗ CHỈ chấp nhận ĐÚNG 1 trong 4
+    giá trị cố định (không dò theo từ khoá gần đúng, vì đây là nhãn kỹ thuật dùng để kiểm tra chất lượng,
+    sai lệch ở đây nguy hiểm hơn sai lệch giọng điệu `tone`) — bất kỳ giá trị lạ/thiếu nào đều rơi về
+    "observed_fact" (mức CHẶT NHẤT), không bao giờ tự nới lỏng khi không chắc chắn."""
+    s = str(raw or "").strip().lower()
+    return s if s in CERTAINTY_LEVELS else "observed_fact"
 
 
 def _coerce_segment(raw: Any) -> ScriptSegment | None:
@@ -88,7 +106,8 @@ def _coerce_segment(raw: Any) -> ScriptSegment | None:
         sid = int(raw.get("id") or 0)
     except (TypeError, ValueError):
         sid = 0
-    return ScriptSegment(sid, start, end, text, normalize_tone(raw.get("tone", raw.get("emotion"))))
+    return ScriptSegment(sid, start, end, text, normalize_tone(raw.get("tone", raw.get("emotion"))),
+                        normalize_certainty(raw.get("certainty")))
 
 
 # ════════════════════════════════════════════════════════════
@@ -96,40 +115,99 @@ def _coerce_segment(raw: Any) -> ScriptSegment | None:
 # ════════════════════════════════════════════════════════════
 _STYLE_INSTRUCTIONS = {
     "natural": "",
-    "humorous": "Giọng văn hài hước, dí dỏm — thỉnh thoảng chêm một câu đùa nhẹ nhàng, tự nhiên, phù hợp nội dung "
-               "(không gượng ép, không lạm dụng).",
-    "formal": "Giọng văn trang trọng, chuyên nghiệp — dùng từ ngữ chuẩn mực, mạch lạc, tránh khẩu ngữ/tiếng lóng.",
+    "humorous": "Humorous, witty tone — occasionally slip in a light, natural joke that fits the content "
+               "(never forced, never overused).",
+    "formal": "Formal, professional tone — precise, coherent wording; avoid colloquialisms/slang.",
+}
+
+# "Narration purpose" — DIFFERENT video purposes need completely different narration approaches (e.g.
+# surveillance/incident footage needs neutral, objective description; an ad needs a persuasive tone) —
+# independent of `narrative_style` (which only decides TONE: humorous/formal/natural). Matches *at minimum*
+# (no need for all 8 at once) the "narration purpose" list already discussed — key names are INTENTIONALLY
+# short, 1-1 with the GUI choices.
+_PURPOSE_INSTRUCTIONS = {
+    "neutral": "PURPOSE: NEUTRAL, objective description of what's happening — no added emotion/personal "
+              "commentary, no speculating about intent/cause if the image isn't clear.",
+    "documentary": "PURPOSE: DOCUMENTARY-style storytelling — calm, substantive tone, placing events in "
+                  "broader context when reasonable, but still grounded in visual evidence, no unsupported "
+                  "speculation.",
+    "emotional": "PURPOSE: EMOTION-rich storytelling — choose words and sentence rhythm that evoke feeling, "
+                "connecting the viewer to the moment in the video, but do NOT invent details just to "
+                "manufacture emotion.",
+    "educational": "PURPOSE: EXPLANATORY/EDUCATIONAL content — prioritize clarity, easy to understand, may "
+                  "add background knowledge directly relevant to what's visible on screen.",
+    "review": "PURPOSE: REVIEW/ANALYSIS — give specific commentary/assessment of what's shown (quality, "
+             "pros/cons...), an opinionated tone that still stays grounded in what the visuals actually show.",
+    "ad": "PURPOSE: ADVERTISING a product/service — persuasive tone, highlight the standout points visible "
+         "on screen, tight pacing, a soft call-to-action near the end if it fits naturally.",
+    "social_short": "PURPOSE: SHORT SOCIAL-MEDIA video — very short sentences, fast pace, get straight to "
+                   "the point from the first sentence, no long preamble.",
+    "light_humor": "PURPOSE: LIGHT HUMOR — witty tone, notice subtle funny/charming details in the footage, "
+                  "never forced, never mocking.",
 }
 
 
-def _narrative_instructions(cfg: Config, *, is_opening_batch: bool, story_hook: str | None) -> str:
+def _creativity_instruction(level: float) -> str:
+    """Mức độ sáng tạo (0.0 bám sát hình ảnh ↔ 1.0 sáng tác tự do) — 3 mốc, mỗi mốc kèm VÍ DỤ cụ thể để
+    Gemini hiểu đúng SẮC THÁI khác biệt (chỉ mô tả bằng lời dễ bị hiểu mơ hồ hơn nhiều so với có ví dụ).
+    NỘI DUNG PROMPT đã dịch sang tiếng Anh để tối ưu (docstring này giữ tiếng Việt cho người đọc code)."""
+    if level <= 0.35:
+        return ("CREATIVITY LEVEL: LOW — ONLY describe what's directly observed, neutrally. Do NOT infer "
+                "characters' intent/emotions, do NOT add details with no evidence in the image. Example AT "
+                "this level: \"A person walks along the beach as the morning light falls over the water.\"")
+    if level <= 0.75:
+        return ("CREATIVITY LEVEL: MEDIUM — may add emotion/rhythm through WORD CHOICE and PHRASING, but "
+                "must NOT invent new events/specific details not present in the image. Example AT this "
+                "level: \"The pace slows, as if this morning were made for noticing rather than rushing "
+                "through.\" — still describes ONLY the actual observed action (walking slowly), just in more "
+                "vivid language, with NO new event added.")
+    return ("CREATIVITY LEVEL: HIGH — may write in a literary, evocative, more interpretive way grounded in "
+            "direct evidence — but ABSOLUTELY MUST NOT invent specific names of people/places, dates, "
+            "occupations, or claim this is a real-world event/person if the image doesn't prove it — the "
+            "creative license applies only to HOW it's told, never to FABRICATING information that looks "
+            "like fact.")
+
+
+def _narrative_instructions(cfg: Config, *, is_opening_batch: bool, story_hook: str | None,
+                            chunk_outline: str | None = None) -> str:
     """Trả về đoạn hướng dẫn bổ sung về NGÔI KỂ và PHONG CÁCH KỂ CHUYỆN, chèn thêm vào prompt.
 
     `is_opening_batch`: True khi đây là lô ảnh ĐẦU TIÊN của TOÀN VIDEO (chunk #0, lô #1) — chỉ lúc này mới
     yêu cầu mở đầu bằng câu chuyện giả tưởng. `story_hook`: nội dung mở đầu đã sinh ra trước đó (từ
     `is_opening_batch`), truyền lại cho MỌI lô sau (kể cả các chunk khác) để Gemini thỉnh thoảng nhắc lại,
     giữ mạch cảm xúc xuyên suốt cả video dài — xem `long_video_pipeline.py`, nơi giá trị này được lưu lại
-    và truyền xuyên suốt các lần gọi `generate_script()` của từng chunk."""
+    và truyền xuyên suốt các lần gọi `generate_script()` của từng chunk.
+    `chunk_outline`: dàn ý tổng thể của CẢ CHUNK (từ `plan_chunk_outline()`, chỉ có khi
+    `cfg.enable_story_plan=True`) — GIỐNG NHAU cho mọi lô trong cùng 1 chunk (khác `story_hook` ở chỗ đó chỉ
+    sinh 1 lần đầu video; `chunk_outline` sinh lại cho MỖI chunk, phản ánh đúng bối cảnh RIÊNG của chunk đó)."""
     lines = []
+    if chunk_outline:
+        lines.append(f"OVERALL OUTLINE for this video segment (to get the hook/development/climax/ending arc "
+                     f"right — use ONLY to GUIDE the storytelling, do not repeat it verbatim): {chunk_outline}")
     if cfg.narrator_pov.strip():
-        lines.append(f"Ngôi kể/xưng hô xuyên suốt: {cfg.narrator_pov.strip()}.")
+        lines.append(f"Narrator point of view, consistent throughout: {cfg.narrator_pov.strip()}.")
+
+    purpose = _PURPOSE_INSTRUCTIONS.get(cfg.narration_purpose, "")
+    if purpose:
+        lines.append(purpose)
+    lines.append(_creativity_instruction(cfg.creativity_level))
 
     if cfg.narrative_style == "fantasy_inspiring":
         if is_opening_batch:
             lines.append(
-                "PHONG CÁCH ĐẶC BIỆT — Kể chuyện giả tưởng & Truyền cảm hứng: MỞ ĐẦU đoạn thuyết minh ĐẦU TIÊN "
-                "bằng một CÂU CHUYỆN GIẢ TƯỞNG NGẮN (2-4 câu, thuộc đoạn/segment đầu tiên), giàu hình ảnh, cuốn "
-                "hút, gợi cảm xúc — có thể là một tình huống, nhân vật hoặc thế giới tưởng tượng LIÊN QUAN tới "
-                "chủ đề video — dùng để DẪN DẮT người xem vào nội dung chính. Ngay sau đó, CHUYỂN TỰ NHIÊN sang "
-                "thuyết minh nội dung THẬT của video (bám sát hình ảnh như bình thường) — câu chuyện giả tưởng "
-                "chỉ là phần mở màn, không được bịa thêm nội dung không có trong hình ảnh ở các đoạn sau.")
+                "SPECIAL STYLE — Fantastical & Inspiring storytelling: OPEN the very FIRST narration segment "
+                "with a SHORT FANTASTICAL STORY (2-4 sentences, part of the first segment), vivid, engaging, "
+                "evocative — it may be a scenario, character, or imagined world RELATED to the video's theme — "
+                "used to DRAW the viewer into the main content. Right after that, transition NATURALLY into "
+                "narrating the video's REAL content (grounded in the visuals as usual) — the fantastical story "
+                "is only the opening hook; later segments must not invent content absent from the visuals.")
         elif story_hook:
             lines.append(
-                "PHONG CÁCH ĐẶC BIỆT — Kể chuyện giả tưởng & Truyền cảm hứng: video này đã MỞ ĐẦU bằng câu "
-                f"chuyện giả tưởng sau: “{story_hook}”. THỈNH THOẢNG (không phải ở mọi đoạn, chỉ vài chỗ hợp lý "
-                "trong lô này) hãy LỒNG GHÉP hoặc NHẮC KHÉO LẠI một chi tiết/hình ảnh/cảm xúc từ câu chuyện đó "
-                "để giữ mạch cảm hứng xuyên suốt — không lặp lại y nguyên, chỉ liên hệ ngắn gọn, tự nhiên, "
-                "không được làm gián đoạn việc bám sát nội dung hình ảnh thực tế.")
+                "SPECIAL STYLE — Fantastical & Inspiring storytelling: this video already OPENED with this "
+                f"fantastical story: “{story_hook}”. OCCASIONALLY (not every segment, just a few fitting spots "
+                "in this batch) WEAVE IN or SUBTLY CALL BACK to a detail/image/feeling from that story to keep "
+                "the inspirational thread alive — don't repeat it verbatim, just a brief, natural callback — "
+                "must not interrupt staying grounded in the actual visual content.")
     else:
         extra = _STYLE_INSTRUCTIONS.get(cfg.narrative_style, "")
         if extra:
@@ -137,36 +215,116 @@ def _narrative_instructions(cfg: Config, *, is_opening_batch: bool, story_hook: 
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
+_CERTAINTY_RULE = (
+    'certainty MUST be ONE of 4 values: "observed_fact" (describes exactly what is DIRECTLY SEEN, no '
+    'inference — e.g. "a person is riding a bicycle"), "safe_inference" (a reasonable, GROUNDED inference '
+    'from the image but not stated as certain — e.g. "it appears to be a quiet morning"), "creative_framing" '
+    '(a literary/evocative way of phrasing, with NO new specific event added), "user_provided_fact" (ONLY '
+    'when the information comes from user-supplied data, not inferred from the image). ABSOLUTELY DO NOT '
+    'invent specific names of people/places, dates, occupations, or claim a real-world event if the image '
+    'does not prove it — if unsure, choose "safe_inference" or write a more neutral sentence; NEVER guess '
+    'and then label it "observed_fact".'
+)
+
+
 def build_batch_prompt(cfg: Config, batch: list[FrameSample], t0: float, t1: float, video_duration: float,
                        previous: list[ScriptSegment], *, is_opening_batch: bool = False,
-                       story_hook: str | None = None) -> str:
+                       story_hook: str | None = None, chunk_outline: str | None = None) -> str:
     wps = cfg.words_per_sec
     example = [{"id": 1, "start_time": "00:00:01.000", "end_time": "00:00:05.500", "duration_sec": 4.5,
-                "text": "Lời thuyết minh khớp với phân cảnh...", "tone": "hao hung"}]
-    frames = "\n".join(f"  Ảnh {i}: {format_timestamp(s.timestamp_sec)}" for i, s in enumerate(batch, start=1))
+                "text": "Narration matching the scene...", "tone": "hao hung", "certainty": "observed_fact"}]
+    frames = "\n".join(f"  Image {i}: {format_timestamp(s.timestamp_sec)}" for i, s in enumerate(batch, start=1))
     prompt = (
-        f"Bạn là biên kịch lồng tiếng chuyên nghiệp. Tôi gửi kèm {len(batch)} ảnh được trích LIÊN TIẾP từ một video KHÔNG LỜI "
-        f"(tổng thời lượng {format_timestamp(video_duration)}). Góc trên bên trái mỗi ảnh có nhãn thời gian HH:MM:SS.mmm — "
-        "đó là thời điểm của ảnh trong video.\n"
-        f"Thứ tự ảnh đính kèm:\n{frames}\n\n"
-        f"NHIỆM VỤ: viết lời thuyết minh bằng {cfg.language_name}, phong cách: {cfg.style}, cho đoạn video từ "
-        f"{format_timestamp(t0)} đến {format_timestamp(t1)}. So sánh các ảnh liên tiếp để hiểu HÀNH ĐỘNG đang diễn ra."
-        f"{_narrative_instructions(cfg, is_opening_batch=is_opening_batch, story_hook=story_hook)}\n\n"
-        "QUY TẮC BẮT BUỘC:\n"
-        "1. Chỉ trả về MỘT khối mã ```json ... ``` duy nhất chứa mảng JSON theo đúng mẫu (không thêm lời dẫn/giải thích):\n"
+        f"You are a professional voice-over scriptwriter. I'm attaching {len(batch)} images extracted "
+        f"CONSECUTIVELY from a SILENT video (total duration {format_timestamp(video_duration)}). The top-left "
+        "corner of each image has a timestamp label HH:MM:SS.mmm — that's the image's position in the video.\n"
+        f"Order of attached images:\n{frames}\n\n"
+        f"TASK: write narration in {cfg.language_name}, style: {cfg.style}, for the video segment from "
+        f"{format_timestamp(t0)} to {format_timestamp(t1)}. Compare consecutive images to understand the "
+        "ACTION taking place."
+        f"{_narrative_instructions(cfg, is_opening_batch=is_opening_batch, story_hook=story_hook, chunk_outline=chunk_outline)}\n\n"
+        "MANDATORY RULES:\n"
+        "1. Return ONLY ONE ```json ... ``` code block containing a JSON array in this exact shape (no preamble/explanation):\n"
         f"```json\n{json.dumps(example, ensure_ascii=False, indent=2)}\n```\n"
-        "2. start_time/end_time dạng HH:MM:SS.mmm; duration_sec = end_time − start_time.\n"
-        f"3. Tốc độ đọc ≈ {wps:g} từ/giây (tiếng Việt: mỗi tiếng ngăn cách bằng khoảng trắng là 1 từ). Số từ của `text` PHẢI ≤ "
-        f"duration_sec × {wps:g} (ví dụ đoạn 4 giây tối đa {int(4 * wps)} từ). Thà ngắn còn hơn quá dài.\n"
-        f"4. Chỉ dùng thời gian trong [{format_timestamp(t0)}, {format_timestamp(t1)}]; các đoạn nối tiếp, KHÔNG chồng lấn, "
-        f"chừa ≥ 0.2 giây giữa hai đoạn, mỗi đoạn dài {cfg.min_segment_sec:g}–10 giây và bám sát mốc thời gian của hình ảnh.\n"
-        "5. Bám sát hình ảnh, không bịa chi tiết; đoạn tĩnh/không có gì đáng nói thì bỏ qua.\n"
-        "6. Văn nói tự nhiên, truyền cảm, liền mạch; không emoji, ký hiệu, ngoặc, viết tắt khó đọc; số viết thành chữ khi cần.\n"
-        '7. tone chỉ được là một trong: "vui ve", "hao hung", "tram am", "trung tinh" (không dấu).\n'
-        "8. id đánh số tăng dần từ 1."
+        "2. start_time/end_time in HH:MM:SS.mmm format; duration_sec = end_time − start_time.\n"
+        f"3. Speaking rate ≈ {wps:g} words/sec (word count = number of whitespace-separated tokens — in "
+        f"Vietnamese that means each syllable counts as one word, not each compound word). The word count of "
+        f"`text` MUST be ≤ duration_sec × {wps:g} (e.g. a 4-second segment gets at most {int(4 * wps)} words). "
+        "Shorter is better than too long.\n"
+        f"4. Only use timestamps within [{format_timestamp(t0)}, {format_timestamp(t1)}]; segments must be "
+        f"sequential, NOT overlapping, with ≥ 0.2s gap between two segments, each segment {cfg.min_segment_sec:g}"
+        "–10 seconds long and tightly timed to the visual action.\n"
+        "5. Stay grounded in the visuals, don't invent details; skip a segment if the footage is static/has "
+        "nothing worth narrating.\n"
+        "6. Natural, expressive, flowing spoken language; no emoji, symbols, brackets, hard-to-read "
+        "abbreviations; spell out numbers as words when needed.\n"
+        '7. tone must be exactly one of: "vui ve", "hao hung", "tram am", "trung tinh" (these are fixed '
+        "internal Vietnamese labels — keep them exactly as written, do not translate them).\n"
+        "8. id numbered sequentially starting from 1.\n"
+        f"9. {_CERTAINTY_RULE}"
     )
     if previous:
-        prompt += "\n\nCác câu thuyết minh ngay trước đó (để nối mạch, KHÔNG lặp lại):\n" + "\n".join(f"- {s.text}" for s in previous[-3:])
+        prompt += "\n\nThe narration lines immediately before this (for continuity, do NOT repeat them):\n" + \
+            "\n".join(f"- {s.text}" for s in previous[-3:])
+    return prompt
+
+
+def build_continuous_batch_prompt(cfg: Config, batch: list[FrameSample], t0: float, t1: float, video_duration: float,
+                                  previous: list[ScriptSegment], *, is_opening_batch: bool = False,
+                                  story_hook: str | None = None, chunk_outline: str | None = None) -> str:
+    """Chế độ "Đọc liên tục" (`cfg.narration_mode == "continuous"`) — THAY VÌ yêu cầu Gemini chia nhỏ 1 lô
+    ảnh thành nhiều câu rời (mỗi câu tự mở/đóng ngữ điệu riêng khi tới lượt TTS, nghe khựng/bằng bằng —
+    xem thảo luận thiết kế), yêu cầu viết LIỀN MẠCH thành MỘT đoạn văn duy nhất cho CẢ LÔ, giữ nguyên dấu
+    câu tự nhiên để TTS tự điều phối ngữ điệu/ngắt nghỉ. Trả về CÙNG SCHEMA JSON như `build_batch_prompt`
+    (mảng có đúng 1 phần tử) — nhờ vậy toàn bộ phần sau của pipeline (parse, validate_and_fix, cache, TTS,
+    time-fit, ghép, ducking, checkpoint) dùng lại NGUYÊN VẸN không cần sửa gì: một "ScriptSegment" dài 16–20s
+    chỉ là một segment bình thường có duration_sec lớn hơn, mọi cơ chế hiện có vẫn áp dụng đúng."""
+    wps = cfg.words_per_sec
+    duration = t1 - t0
+    max_words = max(1, int(duration * wps))
+    example = [{"id": 1, "start_time": format_timestamp(t0), "end_time": format_timestamp(t1),
+                "duration_sec": round(duration, 2), "text": "A single flowing, natural paragraph with proper punctuation...",
+                "tone": "hao hung", "certainty": "observed_fact"}]
+    frames = "\n".join(f"  Image {i}: {format_timestamp(s.timestamp_sec)}" for i, s in enumerate(batch, start=1))
+    prompt = (
+        f"You are a professional voice-over scriptwriter. I'm attaching {len(batch)} images extracted "
+        f"CONSECUTIVELY from a SILENT video (total duration {format_timestamp(video_duration)}). The top-left "
+        "corner of each image has a timestamp label HH:MM:SS.mmm — that's the image's position in the video.\n"
+        f"Order of attached images:\n{frames}\n\n"
+        f"TASK: write A SINGLE CONTINUOUS FLOWING PARAGRAPH in {cfg.language_name}, style: {cfg.style}, fully "
+        f"describing what unfolds from {format_timestamp(t0)} to {format_timestamp(t1)}. Compare consecutive "
+        "images to understand the ACTION taking place, in the correct chronological order."
+        f"{_narrative_instructions(cfg, is_opening_batch=is_opening_batch, story_hook=story_hook, chunk_outline=chunk_outline)}\n\n"
+        "IMPORTANT ABOUT HOW TO WRITE THIS (very different from writing separate standalone sentences):\n"
+        "- Do NOT break it into multiple sentences each isolated to one single moment — write it as ONE "
+        "FLOWING narration, ideas connected naturally with commas, periods, ellipses... so it rises and falls "
+        "naturally when read aloud.\n"
+        "- Keep FULL, natural punctuation (, . ... ! ?) — this is the signal the reader uses to pause in the "
+        "right places automatically. ABSOLUTELY DO NOT write it as a string of short, disconnected, "
+        "list-like sentences.\n\n"
+        "MANDATORY RULES:\n"
+        "1. Return ONLY ONE ```json ... ``` code block containing a JSON array with EXACTLY 1 ELEMENT in this "
+        "exact shape (no preamble):\n"
+        f"```json\n{json.dumps(example, ensure_ascii=False, indent=2)}\n```\n"
+        f"2. start_time MUST be exactly {format_timestamp(t0)}, end_time MUST be exactly {format_timestamp(t1)} "
+        "— DO NOT change them.\n"
+        f"3. Speaking rate ≈ {wps:g} words/sec (word count = number of whitespace-separated tokens — in "
+        f"Vietnamese that means each syllable counts as one word, not each compound word). The TOTAL word "
+        f"count of `text` MUST be ≤ {max_words} words (= {duration:.1f}s × {wps:g} words/sec). Shorter is "
+        "better than too long.\n"
+        "4. Stay grounded in the real footage, don't invent details; if the whole batch is static/has nothing "
+        "worth narrating, write something brief rather than inventing content.\n"
+        "5. Natural, expressive spoken language; no emoji, markdown symbols, brackets, hard-to-read "
+        "abbreviations; spell out numbers as words when needed.\n"
+        '6. tone is ONE shared value for the whole paragraph, must be exactly one of: "vui ve", "hao hung", '
+        '"tram am", "trung tinh" (these are fixed internal Vietnamese labels — keep them exactly as written, '
+        "do not translate them).\n"
+        "7. id = 1 (ONLY one element in the array).\n"
+        f"8. {_CERTAINTY_RULE} (certainty is ONE shared value for the whole paragraph)"
+    )
+    if previous:
+        prompt += "\n\nThe narration paragraph IMMEDIATELY BEFORE this one (for natural continuity, do NOT " \
+            "repeat its ideas/wording):\n" + previous[-1].text
     return prompt
 
 
@@ -180,37 +338,46 @@ def build_batch_prompt(cfg: Config, batch: list[FrameSample], t0: float, t1: flo
 # ════════════════════════════════════════════════════════════
 def build_youtube_prompt(cfg: Config, youtube_url: str, t0: float, t1: float, video_duration: float,
                          previous: list[ScriptSegment], *, is_opening_batch: bool = False,
-                         story_hook: str | None = None) -> str:
+                         story_hook: str | None = None, chunk_outline: str | None = None) -> str:
     wps = cfg.words_per_sec
     example = [{"id": 1, "start_time": "00:00:01.000", "end_time": "00:00:05.500", "duration_sec": 4.5,
-                "text": "Lời thuyết minh khớp với phân cảnh...", "tone": "hao hung"}]
+                "text": "Narration matching the scene...", "tone": "hao hung", "certainty": "observed_fact"}]
     prompt = (
-        f"Đây là link video YouTube: {youtube_url}\n"
-        f"Video này KHÔNG có lời thoại/thuyết minh (silent/gameplay/B-roll...), tổng thời lượng "
-        f"{format_timestamp(video_duration)}. HÃY XEM kỹ đoạn từ {format_timestamp(t0)} đến {format_timestamp(t1)} "
-        "của video này (bỏ qua các phần khác) — chú ý cả HÌNH ẢNH lẫn diễn biến theo thời gian.\n\n"
-        f"NHIỆM VỤ: viết lời thuyết minh bằng {cfg.language_name}, phong cách: {cfg.style}, cho ĐÚNG đoạn "
-        f"[{format_timestamp(t0)}, {format_timestamp(t1)}] vừa nêu, bám sát hành động/nội dung thật đang diễn ra."
-        f"{_narrative_instructions(cfg, is_opening_batch=is_opening_batch, story_hook=story_hook)}\n\n"
-        "QUY TẮC BẮT BUỘC:\n"
-        "1. Chỉ trả về MỘT khối mã ```json ... ``` duy nhất chứa mảng JSON theo đúng mẫu (không thêm lời dẫn/giải thích):\n"
+        f"Here is a YouTube video link: {youtube_url}\n"
+        f"This video has NO dialogue/narration (silent/gameplay/B-roll...), total duration "
+        f"{format_timestamp(video_duration)}. WATCH closely the segment from {format_timestamp(t0)} to "
+        f"{format_timestamp(t1)} of this video (ignore other parts) — pay attention to both the VISUALS and "
+        "how the action unfolds over time.\n\n"
+        f"TASK: write narration in {cfg.language_name}, style: {cfg.style}, for EXACTLY the "
+        f"[{format_timestamp(t0)}, {format_timestamp(t1)}] segment stated above, grounded in the real action/"
+        "content taking place.\n"
+        f"{_narrative_instructions(cfg, is_opening_batch=is_opening_batch, story_hook=story_hook, chunk_outline=chunk_outline)}\n\n"
+        "MANDATORY RULES:\n"
+        "1. Return ONLY ONE ```json ... ``` code block containing a JSON array in this exact shape (no preamble/explanation):\n"
         f"```json\n{json.dumps(example, ensure_ascii=False, indent=2)}\n```\n"
-        "2. start_time/end_time dạng HH:MM:SS.mmm (mốc thời gian THẬT trong video, không phải mốc riêng của đoạn "
-        "trích); duration_sec = end_time − start_time.\n"
-        f"3. Tốc độ đọc ≈ {wps:g} từ/giây (tiếng Việt: mỗi tiếng ngăn cách bằng khoảng trắng là 1 từ). Số từ của "
-        f"`text` PHẢI ≤ duration_sec × {wps:g} (ví dụ đoạn 4 giây tối đa {int(4 * wps)} từ). Thà ngắn còn hơn quá dài.\n"
-        f"4. CHỈ dùng thời gian trong [{format_timestamp(t0)}, {format_timestamp(t1)}]; các đoạn nối tiếp, KHÔNG "
-        f"chồng lấn, chừa ≥ 0.2 giây giữa hai đoạn, mỗi đoạn dài {cfg.min_segment_sec:g}–10 giây.\n"
-        "5. Bám sát nội dung THẬT của video, không bịa chi tiết; đoạn tĩnh/không có gì đáng nói thì bỏ qua.\n"
-        "6. Văn nói tự nhiên, truyền cảm, liền mạch; không emoji, ký hiệu, ngoặc, viết tắt khó đọc; số viết thành "
-        "chữ khi cần.\n"
-        '7. tone chỉ được là một trong: "vui ve", "hao hung", "tram am", "trung tinh" (không dấu).\n'
-        "8. id đánh số tăng dần từ 1.\n"
-        "9. Nếu KHÔNG xem được nội dung video từ link này (video riêng tư/đã gỡ/không truy cập được), trả về "
-        'CHÍNH XÁC: ```json\n[]\n```\n và đừng đoán mò/bịa nội dung.'
+        "2. start_time/end_time in HH:MM:SS.mmm format (the video's REAL timestamps, not relative to this "
+        "clip); duration_sec = end_time − start_time.\n"
+        f"3. Speaking rate ≈ {wps:g} words/sec (word count = number of whitespace-separated tokens — in "
+        f"Vietnamese that means each syllable counts as one word, not each compound word). The word count of "
+        f"`text` MUST be ≤ duration_sec × {wps:g} (e.g. a 4-second segment gets at most {int(4 * wps)} words). "
+        "Shorter is better than too long.\n"
+        f"4. ONLY use timestamps within [{format_timestamp(t0)}, {format_timestamp(t1)}]; segments must be "
+        f"sequential, NOT overlapping, with ≥ 0.2s gap between two segments, each segment "
+        f"{cfg.min_segment_sec:g}–10 seconds long.\n"
+        "5. Stay grounded in the video's REAL content, don't invent details; skip a segment if the footage is "
+        "static/has nothing worth narrating.\n"
+        "6. Natural, expressive, flowing spoken language; no emoji, symbols, brackets, hard-to-read "
+        "abbreviations; spell out numbers as words when needed.\n"
+        '7. tone must be exactly one of: "vui ve", "hao hung", "tram am", "trung tinh" (these are fixed '
+        "internal Vietnamese labels — keep them exactly as written, do not translate them).\n"
+        "8. id numbered sequentially starting from 1.\n"
+        f"9. {_CERTAINTY_RULE}\n"
+        "10. If you CANNOT watch this video's content from this link (private/removed/inaccessible video), "
+        'return EXACTLY: ```json\n[]\n```\n and do not guess or invent content.'
     )
     if previous:
-        prompt += "\n\nCác câu thuyết minh ngay trước đó (để nối mạch, KHÔNG lặp lại):\n" + "\n".join(f"- {s.text}" for s in previous[-3:])
+        prompt += "\n\nThe narration lines immediately before this (for continuity, do NOT repeat them):\n" + \
+            "\n".join(f"- {s.text}" for s in previous[-3:])
     return prompt
 
 
@@ -274,10 +441,125 @@ def plan_batches(samples: list[FrameSample], per_prompt: int) -> list[list[Frame
     return [samples[i:i + per_prompt] for i in range(0, len(samples), per_prompt)]
 
 
+def plan_batches_by_scene(samples: list[FrameSample], min_batch_sec: float, max_per_batch: int
+                         ) -> list[list[FrameSample]]:
+    """Gộp frame thành lô THEO ĐÚNG RANH GIỚI CẢNH THẬT (dùng khi `cfg.extract_mode == "scene"`), thay vì
+    cắt cứng theo số lượng như `plan_batches()` — mỗi `FrameSample` đã mang sẵn `window_start`/`window_end`
+    của đúng cảnh nó thuộc về (từ `video_processor.build_time_windows()`); hàm này chỉ cần GOM LẠI theo
+    đúng thông tin đó, không cần dò lại cảnh cắt lần nữa.
+
+    Vì sao cần: trước đây dù đã bật `extract_mode="scene"` để lấy mẫu đúng theo cảnh, bước GHÉP LÔ GỬI
+    GEMINI vẫn cắt theo số lượng cố định — một cảnh có thể bị xẻ làm đôi giữa 2 lô, hoặc nhiều cảnh ngắn bị
+    trộn lẫn tuỳ ý, khiến mỗi lô không còn tương ứng với MỘT đơn vị nội dung thật nào — đặc biệt ảnh hưởng
+    tới `narration_mode="continuous"` (mỗi lô = 1 đoạn văn): đoạn văn khi đó không khớp với bất kỳ cảnh thật
+    nào, mất hết ý nghĩa của việc dùng `extract_mode="scene"`.
+
+    `min_batch_sec`: cảnh THẬT quá ngắn (vd 0.5s) sẽ gộp vào lô kế tiếp — tránh sinh ra lô/đoạn văn quá
+    vụn, không đủ nội dung để viết một câu/đoạn có ý nghĩa (đúng tinh thần tài liệu: "một paragraph có thể
+    đi qua ranh giới nhiều cảnh ngắn — đây là bình thường").
+    `max_per_batch`: giới hạn trên số ảnh/lô (phòng trường hợp 1 cảnh quá dài có nhiều frame mẫu) — cắt
+    thêm trong CÙNG MỘT cảnh nếu vượt, KHÔNG trộn sang cảnh khác."""
+    if not samples:
+        return []
+    groups: list[list[FrameSample]] = []
+    cur: list[FrameSample] = [samples[0]]
+    for s in samples[1:]:
+        same_window = (s.window_start, s.window_end) == (cur[-1].window_start, cur[-1].window_end)
+        if same_window and len(cur) < max_per_batch:
+            cur.append(s)
+        else:
+            groups.append(cur)
+            cur = [s]
+    groups.append(cur)
+
+    # gộp các nhóm quá ngắn vào nhóm KẾ TIẾP (không gộp ngược về trước, giữ đúng thứ tự thời gian)
+    merged: list[list[FrameSample]] = []
+    pending: list[FrameSample] = []
+    for g in groups:
+        pending += g
+        duration = pending[-1].window_end - pending[0].window_start
+        if duration >= min_batch_sec or g is groups[-1]:
+            merged.append(pending)
+            pending = []
+    if pending:        # phần dư hiếm gặp (vd nhóm cuối vẫn ngắn) — gộp vào lô cuối cùng đã có
+        if merged:
+            merged[-1] = merged[-1] + pending
+        else:
+            merged.append(pending)
+    return merged
+
+
 def _fingerprint(cfg: Config, media: MediaInfo) -> dict[str, Any]:
     return {"video": cfg.video_path.name, "size": cfg.video_path.stat().st_size, "duration": round(media.duration_sec, 2),
             "mode": cfg.extract_mode, "interval": cfg.frame_interval_sec, "per_prompt": cfg.frames_per_prompt,
             "language": cfg.language, "style": cfg.style, "wps": cfg.words_per_sec}
+
+
+def build_chunk_outline_prompt(cfg: Config, sparse_timestamps: list[float], t0: float, t1: float,
+                               video_duration: float) -> str:
+    """Prompt lập DÀN Ý TỔNG THỂ cho cả chunk (mở đầu/phát triển/cao trào/kết) — phiên bản NHẸ của "3-pass
+    Gemini" (hiểu hình ảnh → lập dàn ý → viết lời): thay vì tách thành 2 lượt gọi RIÊNG mỗi LÔ NHỎ (tốn gấp
+    ~3 lần số lượt gọi Gemini cho cả video), chỉ thêm ĐÚNG 1 lượt gọi cho CẢ CHUNK LỚN, dùng frame lấy mẫu
+    THƯA (không phải mọi frame của mọi lô) — rẻ hơn nhiều, vẫn cho Gemini thấy bối cảnh tổng thể trước khi
+    viết từng câu ở các lượt sau."""
+    stamps = "\n".join(f"  Image {i}: {format_timestamp(t)}" for i, t in enumerate(sparse_timestamps, start=1))
+    example = [{"outline": "This is the opening, introducing the setting... The most notable point is... The emotional arc should..."}]
+    return (
+        f"You are a scriptwriter. I'm attaching {len(sparse_timestamps)} SPARSELY sampled images, spread "
+        f"evenly from {format_timestamp(t0)} to {format_timestamp(t1)} of a video (total duration "
+        f"{format_timestamp(video_duration)}) — ONLY so you can grasp the overall context, no need to "
+        "describe details.\n"
+        f"Order of images:\n{stamps}\n\n"
+        "TASK: write a BRIEF OUTLINE (3-5 sentences) for this video segment, stating: whether this is the "
+        "OPENING/DEVELOPMENT/CLIMAX/ENDING of the overall story (if identifiable), what's most worth noting, "
+        "and which direction the emotional arc should take. This is ONLY an outline to GUIDE the storytelling "
+        "in the detailed narration-writing step that follows — do NOT write actual narration, do NOT invent "
+        "details absent from the images. If the images aren't clear enough to determine the structure, just "
+        "give a brief summary of the general content.\n\n"
+        "Return ONLY ONE ```json ... ``` code block containing a JSON array with EXACTLY 1 element in this "
+        "shape (no preamble):\n"
+        f"```json\n{json.dumps(example, ensure_ascii=False, indent=2)}\n```"
+    )
+
+
+def plan_chunk_outline(driver: Any, samples: list[FrameSample], cfg: Config, media: MediaInfo,
+                       chunk_tag: str) -> str | None:
+    """Gọi Gemini ĐÚNG 1 LẦN cho cả chunk, lấy dàn ý tổng thể — xem `build_chunk_outline_prompt`. Trả về
+    `None` nếu `cfg.enable_story_plan=False` (mặc định — giữ nguyên tốc độ như trước khi có tính năng này),
+    hoặc nếu có lỗi (không chặn cả pipeline chỉ vì bước LÀM GIÀU THÊM này thất bại — viết lời vẫn chạy bình
+    thường mà không có dàn ý, giống hệt trước đây)."""
+    if not cfg.enable_story_plan or not samples:
+        return None
+    t0, t1 = samples[0].window_start, samples[-1].window_end
+    video_duration = media.duration_sec
+    cache = cfg.batches_dir / f"{chunk_tag}_outline.json"
+    fp = {"range": [round(t0, 3), round(t1, 3)], "style": cfg.style, "narrative_style": cfg.narrative_style,
+         "creativity_level": cfg.creativity_level}
+    if not cfg.force and cache.is_file():
+        try:
+            data = read_json(cache)
+            if data.get("fingerprint") == fp:
+                log.info("Dàn ý chunk (%s → %s): dùng lại kết quả đã lưu.", format_timestamp(t0), format_timestamp(t1))
+                return data.get("outline") or None
+        except (PipelineError, KeyError, TypeError):
+            pass
+
+    n_sparse = min(len(samples), 10)
+    step = max(1, len(samples) // n_sparse)
+    sparse = samples[::step][:n_sparse]
+    prompt = build_chunk_outline_prompt(cfg, [s.timestamp_sec for s in sparse], t0, t1, video_duration)
+    try:
+        log.info("Đang lập dàn ý tổng thể cho chunk (%s → %s, %d ảnh thưa)...", format_timestamp(t0), format_timestamp(t1), len(sparse))
+        raw = driver.ask_json(prompt, [s.path for s in sparse], label=f"{chunk_tag}-outline")
+        outline = str(raw[0].get("outline", "")).strip() if raw and isinstance(raw[0], dict) else ""
+        cfg.batches_dir.mkdir(parents=True, exist_ok=True)
+        write_json(cache, {"fingerprint": fp, "outline": outline})
+        if outline:
+            log.info("Dàn ý: %s", outline[:200] + ("…" if len(outline) > 200 else ""))
+        return outline or None
+    except Exception as e:  # noqa: BLE001 — bước LÀM GIÀU THÊM, lỗi ở đây KHÔNG được chặn cả pipeline
+        log.warning("Lập dàn ý chunk thất bại (%s) — bỏ qua, viết lời tiếp tục bình thường không có dàn ý.", e)
+        return None
 
 
 def generate_script(driver: Any, samples: list[FrameSample], cfg: Config, media: MediaInfo, *,
@@ -295,7 +577,10 @@ def generate_script(driver: Any, samples: list[FrameSample], cfg: Config, media:
     `long_video_pipeline.py` mang tiếp qua các chunk SAU, giúp Gemini thỉnh thoảng nhắc lại xuyên suốt cả
     video dài — chỉ trích MỘT LẦN DUY NHẤT (lô 1 của chunk 0); các lần gọi sau nhận `story_hook` có sẵn và
     CHỈ TRUYỀN LẠI NGUYÊN VẸN, không trích lại."""
-    batches = plan_batches(samples, cfg.frames_per_prompt)
+    if cfg.extract_mode == "scene":
+        batches = plan_batches_by_scene(samples, cfg.min_segment_sec, cfg.frames_per_prompt)
+    else:
+        batches = plan_batches(samples, cfg.frames_per_prompt)
     fp = _fingerprint(cfg, media)
     cfg.batches_dir.mkdir(parents=True, exist_ok=True)
     if cfg.force:
@@ -303,6 +588,7 @@ def generate_script(driver: Any, samples: list[FrameSample], cfg: Config, media:
             f.unlink(missing_ok=True)
     segments: list[ScriptSegment] = []
     video_duration = context_duration_sec if context_duration_sec is not None else media.duration_sec
+    chunk_outline = plan_chunk_outline(driver, samples, cfg, media, batch_tag)
 
     for bi, batch in enumerate(batches, start=1):
         t0, t1 = batch[0].window_start, batch[-1].window_end
@@ -320,8 +606,9 @@ def generate_script(driver: Any, samples: list[FrameSample], cfg: Config, media:
         if raw is None:
             log.info("Lô %d/%d (%s → %s, %d ảnh): gửi %s...", bi, len(batches), format_timestamp(t0), format_timestamp(t1),
                      len(batch), "Gemini Web" if cfg.engine == "web" else "Gemini API")
-            prompt = build_batch_prompt(cfg, batch, t0, t1, video_duration, segments,
-                                        is_opening_batch=opening, story_hook=story_hook)
+            build_prompt = build_continuous_batch_prompt if cfg.narration_mode == "continuous" else build_batch_prompt
+            prompt = build_prompt(cfg, batch, t0, t1, video_duration, segments,
+                                  is_opening_batch=opening, story_hook=story_hook, chunk_outline=chunk_outline)
             raw = driver.ask_json(prompt, [s.path for s in batch], label=f"{batch_tag}-{bi}")
             write_json(cache, {"fingerprint": fp, "range": [round(t0, 3), round(t1, 3)], "segments": raw})
 
@@ -407,7 +694,28 @@ def validate_and_fix(segments: list[ScriptSegment], cfg: Config, video_duration:
     covered = sum(s.duration_sec for s in fixed)
     log.info("Kịch bản: %d đoạn, phủ %.0f%% video (%.1fs/%.1fs).", len(fixed), 100 * covered / max(video_duration, 1e-6),
              covered, video_duration)
+    check_certainty(fixed, cfg)
     return fixed
+
+
+def check_certainty(segments: list[ScriptSegment], cfg: Config) -> dict[str, int]:
+    """Đếm phân bố nhãn `certainty` của toàn bộ kịch bản — chỉ BÁO CÁO (log), KHÔNG tự động sửa nội dung
+    (tự động viết lại câu "có vẻ đáng ngờ" rủi ro cao hơn lợi ích — có thể sửa nhầm câu vốn đã đúng). Cảnh
+    báo khi tỷ lệ "creative_framing" cao bất thường so với mức sáng tạo người dùng đã chọn THẤP — dấu hiệu
+    Gemini không tuân thủ đúng yêu cầu, người dùng nên tự xem lại `script.json`."""
+    counts = {level: 0 for level in CERTAINTY_LEVELS}
+    for s in segments:
+        counts[s.certainty] = counts.get(s.certainty, 0) + 1
+    total = len(segments)
+    if total == 0:
+        return counts
+    creative_ratio = counts.get("creative_framing", 0) / total
+    if cfg.creativity_level <= 0.35 and creative_ratio > 0.2:
+        log.warning("Mức sáng tạo THẤP (%.2f) nhưng %.0f%% đoạn (%d/%d) được gắn nhãn 'creative_framing' — "
+                   "Gemini có thể chưa tuân thủ đúng yêu cầu, nên xem lại script.json.",
+                   cfg.creativity_level, creative_ratio * 100, counts["creative_framing"], total)
+    log.info("Phân bố độ tin cậy nội dung: %s", ", ".join(f"{k}={v}" for k, v in counts.items() if v) or "(rỗng)")
+    return counts
 
 
 def _looks_missing_diacritics(text: str, language: str) -> bool:
@@ -434,11 +742,14 @@ _VI_DIACRITIC_CHARS = set("àáảãạăằắẳẵặâầấẩẫậèéẻ
 def _shorten(driver: Any, too_long: list[ScriptSegment], cfg: Config, round_no: int) -> None:
     payload = [{"id": s.id, "duration_sec": round(s.duration_sec, 2), "max_words": max_words_for(s, cfg), "text": s.text}
                for s in too_long]
-    prompt = (f"Bạn là biên tập viên lồng tiếng. Rút gọn TỪNG lời thuyết minh ({cfg.language_name}) dưới đây sao cho số từ ≤ max_words, "
-              "giữ ý chính, văn nói tự nhiên, không đổi ngôn ngữ, không thêm ký hiệu. "
-              "BẮT BUỘC viết ĐẦY ĐỦ DẤU THANH VÀ DẤU NGUYÊN ÂM tiếng Việt như bình thường "
-              "(vd 'giữa đại ngàn' — TUYỆT ĐỐI KHÔNG được bỏ dấu, KHÔNG viết kiểu không dấu 'giua dai ngan').\n"
-              'Chỉ trả về MỘT khối mã ```json ... ``` chứa mảng [{"id": <id>, "text": "<lời đã rút gọn>"}] cho đúng các id sau:\n'
+    vi_note = (" MANDATORY: write WITH FULL VIETNAMESE TONE AND VOWEL DIACRITICS as normal (e.g. 'giữa đại "
+              "ngàn' — ABSOLUTELY DO NOT drop the diacritics, do NOT write it unaccented like 'giua dai "
+              "ngan').") if cfg.language == "vi" else ""
+    prompt = (f"You are a voice-over editor. Shorten EACH narration line ({cfg.language_name}) below so its "
+              "word count ≤ max_words, keeping the main idea, natural spoken language, same language, no "
+              f"added symbols.{vi_note}\n"
+              'Return ONLY ONE ```json ... ``` code block containing [{"id": <id>, "text": "<shortened line>"}] '
+              "matching exactly these ids:\n"
               f"```json\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n```")
     raw = driver.ask_json(prompt, [], label=f"shorten-{round_no}")
     by_id = {s.id: s for s in too_long}

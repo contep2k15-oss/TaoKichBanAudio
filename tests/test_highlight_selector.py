@@ -69,8 +69,11 @@ check("dữ liệu hỏng → None, không crash", h5 is None)
 # ── build_highlight_prompt: nội dung cơ bản đúng ──
 p = build_highlight_prompt(__import__("config").Config(video_path=None, output_dir="/tmp/hx"), [2.0, 8.0], 0.0, 12.0, 60.0)
 check("prompt chứa mốc thời gian khoảng đang xét", "00:00:00.000" in p and "00:00:12.000" in p)
-check("prompt yêu cầu định dạng JSON có 'score'", '"score"' in p)
-check("prompt cho phép trả về RỖNG khi không có gì nổi bật", "RỖNG" in p)
+# LƯU Ý: prompt đã nâng cấp lên chấm điểm ĐA TIÊU CHÍ (story_value/visual_quality/...) thay vì field "score"
+# đơn giản — xem test_highlight_multicriteria.py để test đầy đủ phần đó. Vẫn giữ tương thích ngược với cache
+# định dạng "score" cũ qua _composite_score(), không ảnh hưởng gì ở đây.
+check("prompt yêu cầu định dạng JSON đa tiêu chí (đã nâng cấp)", '"story_value"' in p)
+check("prompt cho phép trả về RỖNG khi không có gì nổi bật", "EMPTY array" in p)
 
 # 7) hai đoạn CHẠM SÁT NHAU (đoạn này kết thúc đúng lúc đoạn kia bắt đầu) → KHÔNG bị coi là chồng lấn,
 #    cả hai đều được giữ (vùng "hay" trải dài qua ranh giới 2 lô quét liền kề)

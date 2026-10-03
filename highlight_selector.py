@@ -66,28 +66,63 @@ def select_highlights(candidates: list[tuple[float, float, float]], target_total
 # ════════════════════════════════════════════════════════════
 # 2) Prompt & bóc tách phản hồi Gemini
 # ════════════════════════════════════════════════════════════
+# Trọng số tổng hợp điểm ĐA TIÊU CHÍ thành 1 điểm cuối (thang 0-10) để đưa vào ĐÚNG `select_highlights()`
+# hiện có — KHÔNG đổi thuật toán chọn lọc lõi đã kiểm chứng kỹ, chỉ làm GIÀU hơn cách Gemini tự chấm điểm.
+_CRITERIA_WEIGHTS = {"story_value": 0.35, "visual_quality": 0.25, "context_value": 0.15, "transition_value": 0.15}
+_REDUNDANCY_WEIGHT = 0.30   # phạt TRỪ, không cộng — đoạn càng lặp lại nội dung đã có càng bị trừ điểm
+
+
 def build_highlight_prompt(cfg: Config, frame_timestamps: list[float], t0: float, t1: float,
                            video_duration: float) -> str:
-    stamps = "\n".join(f"  Ảnh {i}: {format_timestamp(t)}" for i, t in enumerate(frame_timestamps, start=1))
-    example = [{"start_time": "00:01:12.000", "end_time": "00:01:20.000", "score": 9,
-                "reason": "cao trào hành động, hình ảnh ấn tượng"}]
+    stamps = "\n".join(f"  Image {i}: {format_timestamp(t)}" for i, t in enumerate(frame_timestamps, start=1))
+    example = [{"start_time": "00:01:12.000", "end_time": "00:01:20.000", "reason": "action climax, striking visual",
+                "story_value": 0.9, "visual_quality": 0.8, "context_value": 0.5, "transition_value": 0.6,
+                "redundancy_penalty": 0.1}]
     return (
-        f"Bạn là biên tập viên dựng highlight chuyên nghiệp. Tôi gửi kèm {len(frame_timestamps)} ảnh lấy mẫu "
-        f"THƯA từ một video (tổng thời lượng {format_timestamp(video_duration)}), chỉ trong khoảng "
-        f"[{format_timestamp(t0)}, {format_timestamp(t1)}]. Góc trên-trái mỗi ảnh có nhãn thời gian.\n"
-        f"Thứ tự ảnh:\n{stamps}\n\n"
-        "NHIỆM VỤ: xác định những KHOẢNG THỜI GIAN đáng xem/đắt giá nhất trong đoạn này (cao trào, hình ảnh "
-        "ấn tượng, khoảnh khắc quan trọng, đẹp mắt, hài hước, gây bất ngờ...) — bỏ qua đoạn tẻ nhạt/lặp lại/"
-        "không có gì đáng chú ý. Ước lượng ranh giới thời gian dựa trên các ảnh đã cho (có thể nội suy giữa "
-        "hai ảnh liền kề), không bắt buộc trùng khớp chính xác từng ảnh.\n\n"
-        "QUY TẮC BẮT BUỘC:\n"
-        "1. Chỉ trả về MỘT khối mã ```json ... ``` chứa mảng JSON theo đúng mẫu (không thêm lời dẫn):\n"
+        f"You are a professional highlight-reel editor. I'm attaching {len(frame_timestamps)} SPARSELY "
+        f"sampled images from a video (total duration {format_timestamp(video_duration)}), only within the "
+        f"range [{format_timestamp(t0)}, {format_timestamp(t1)}]. The top-left corner of each image has a "
+        "timestamp label.\n"
+        f"Order of images:\n{stamps}\n\n"
+        "TASK: identify the most WATCHABLE/VALUABLE TIME RANGES in this segment (action climax, striking "
+        "visuals, important moments, beautiful, funny, surprising...) — skip dull/repetitive/unremarkable "
+        "stretches. Estimate the time boundaries based on the given images (you may interpolate between two "
+        "adjacent images); they don't have to exactly match a specific image.\n\n"
+        "Score EACH CRITERION separately (each on a 0.0–1.0 scale, score HONESTLY — not every segment should "
+        "score high on every criterion):\n"
+        "- story_value: how important this segment is to the OVERALL STORY ARC (an opening/climax/important "
+        "turning point matters more than a pretty moment that doesn't affect the story).\n"
+        "- visual_quality: pure visual quality (sharp, well-composed, well-lit, not shaky/blurry).\n"
+        "- context_value: how necessary this is for the viewer to UNDERSTAND the context/what's happening (an "
+        "explanatory/context-setting segment may be worth keeping even if not 'beautiful').\n"
+        "- transition_value: whether this segment creates a SMOOTH transition into/out of the surrounding "
+        "segments (an abrupt cut that's hard to connect scores low).\n"
+        "- redundancy_penalty: how much this REPEATS content already shown elsewhere in the video (the more "
+        "repetitive, the higher — a completely fresh segment gets 0).\n\n"
+        "MANDATORY RULES:\n"
+        "1. Return ONLY ONE ```json ... ``` code block containing a JSON array in this exact shape (no preamble):\n"
         f"```json\n{json.dumps(example, ensure_ascii=False, indent=2)}\n```\n"
-        "2. start_time/end_time dạng HH:MM:SS.mmm, PHẢI nằm trong khoảng đã cho ở trên; mỗi đoạn dài 2–15 giây.\n"
-        "3. score từ 1 (bình thường) đến 10 (cực kỳ đáng xem) — chấm điểm trung thực, không phải đoạn nào cũng cao.\n"
-        "4. Có thể trả về mảng RỖNG nếu đoạn này không có gì nổi bật — đừng cố nhét đoạn tầm thường vào.\n"
-        "5. Các đoạn không cần liền mạch, có thể bỏ trống khoảng giữa; không chồng lấn nhau."
+        "2. start_time/end_time in HH:MM:SS.mmm format, MUST fall within the range given above; each segment "
+        "2–15 seconds long.\n"
+        "3. You may return an EMPTY array if this segment has nothing noteworthy — don't force in mediocre "
+        "segments.\n"
+        "4. Segments don't need to be contiguous, gaps between them are fine; they must not overlap each other."
     )
+
+
+def _composite_score(raw: dict) -> float:
+    """Tổng hợp điểm đa tiêu chí thành 1 con số (thang 0-10) để đưa vào `select_highlights()`. TƯƠNG THÍCH
+    NGƯỢC: nếu `raw` chỉ có field `score` đơn giản (định dạng CŨ trước khi có đa tiêu chí — vd cache
+    `highlight_batch_*.json` đã lưu từ trước, hoặc Gemini lỡ chỉ trả về đúng field này), dùng THẲNG giá trị
+    đó, không tính composite — đảm bảo không phá vỡ cache cũ trên đĩa người dùng đang có sẵn."""
+    if "score" in raw and not any(k in raw for k in _CRITERIA_WEIGHTS):
+        try:
+            return float(raw["score"])
+        except (TypeError, ValueError):
+            return 5.0
+    weighted = sum(_CRITERIA_WEIGHTS[k] * max(0.0, min(1.0, float(raw.get(k, 0.0)))) for k in _CRITERIA_WEIGHTS)
+    redundancy = max(0.0, min(1.0, float(raw.get("redundancy_penalty", 0.0))))
+    return max(0.0, weighted - _REDUNDANCY_WEIGHT * redundancy) * 10.0
 
 
 def _coerce_highlight(raw: Any, t0: float, t1: float) -> tuple[float, float, float] | None:
@@ -96,7 +131,7 @@ def _coerce_highlight(raw: Any, t0: float, t1: float) -> tuple[float, float, flo
     try:
         start = parse_timestamp(raw.get("start_time"))
         end = parse_timestamp(raw.get("end_time"))
-        score = float(raw.get("score", 5))
+        score = _composite_score(raw)
     except (ValueError, TypeError):
         return None
     if end <= start:

@@ -76,7 +76,7 @@ def fake_reply(req: dict) -> str:
     if "Rút gọn" in prompt:
         ids = [int(i) for i in re.findall(r'"id": (\d+)', prompt)]
         return "```json\n" + json.dumps([{"id": i, "text": "ngắn gọn thôi nhé"} for i in ids], ensure_ascii=False) + "\n```"
-    stamps = [parse_timestamp(m) for m in re.findall(r"Ảnh \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
+    stamps = [parse_timestamp(m) for m in re.findall(r"Image \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
     assert len(stamps) == req["n_files"], f"prompt liệt kê {len(stamps)} ảnh nhưng đính kèm {req['n_files']}"
     segs = []
     for k, t in enumerate(stamps, start=1):
@@ -109,7 +109,7 @@ def test_short_video_single_chunk(tmp: Path, srv: FakeGeminiServer) -> None:
     check("1 chunk: chạy đủ 4 giai đoạn pipeline", steps == [1, 2, 3, 4], str(steps))
 
     script = json.loads(cfg.script_path.read_text(encoding="utf-8"))
-    check("script.json đúng schema", all(set(s) == {"id", "start_time", "end_time", "duration_sec", "text", "tone"} for s in script)
+    check("script.json đúng schema", all(set(s) == {"id", "start_time", "end_time", "duration_sec", "text", "tone", "certainty"} for s in script)
           and [s["id"] for s in script] == list(range(1, len(script) + 1)))
     info = probe_media(out["video"])
     check(f"video cuối {info.duration_sec:.2f}s có audio (khớp video gốc)", abs(info.duration_sec - 9.0) < 0.3 and info.has_audio)

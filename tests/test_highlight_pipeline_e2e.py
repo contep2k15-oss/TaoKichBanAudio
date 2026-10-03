@@ -30,14 +30,14 @@ HOT_ZONE = (10.0, 20.0)   # "đoạn hay" giả lập trong video 30s
 def fake_reply(req: dict) -> str:
     prompt = req["prompt"]
     if "đắt giá" in prompt or "highlight" in prompt.lower() or "score" in prompt:
-        m = re.search(r"trong khoảng \[(\d\d:\d\d:\d\d\.\d+), (\d\d:\d\d:\d\d\.\d+)\]", prompt)
+        m = re.search(r"within the range \[(\d\d:\d\d:\d\d\.\d+), (\d\d:\d\d:\d\d\.\d+)\]", prompt)
         t0, t1 = parse_timestamp(m.group(1)), parse_timestamp(m.group(2))
         overlap = max(0.0, min(t1, HOT_ZONE[1]) - max(t0, HOT_ZONE[0]))
         seg = ([{"start_time": format_timestamp(max(t0, HOT_ZONE[0])), "end_time": format_timestamp(min(t1, HOT_ZONE[1])),
                 "score": 9, "reason": "hay"}] if overlap > 1.0 else [])
         return "```json\n" + json.dumps(seg, ensure_ascii=False) + "\n```"
     # prompt viết KỊCH BẢN bình thường (áp cho video ĐàCẮT)
-    stamps = [parse_timestamp(m) for m in re.findall(r"Ảnh \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
+    stamps = [parse_timestamp(m) for m in re.findall(r"Image \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
     segs = [{"id": k, "start_time": format_timestamp(t - 0.4), "end_time": format_timestamp(t + 0.4),
             "text": "một hai ba bốn", "tone": "vui ve"} for k, t in enumerate(stamps, start=1)]
     return "```json\n" + json.dumps(segs, ensure_ascii=False) + "\n```"

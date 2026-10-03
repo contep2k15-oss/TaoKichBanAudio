@@ -15,39 +15,43 @@ def check(name, cond):
 
 sample = [FrameSample(1, 2.0, Path("f.jpg"), 0.0, 4.0)]
 
-# 1) mặc định (natural, không có POV) → prompt KHÔNG có hướng dẫn ngôi kể/phong cách đặc biệt
+# 1) mặc định (natural, không có POV) → prompt KHÔNG có hướng dẫn NGÔI KỂ/PHONG CÁCH ĐẶC BIỆT nào
+#    (LƯU Ý: từ khi thêm "mục đích narration" + "mức độ sáng tạo", _narrative_instructions() LUÔN có nội
+#    dung — không còn rỗng tuyệt đối ở mặc định nữa, đây là thay đổi CÓ CHỦ ĐÍCH, xem test_purpose_creativity.py)
 cfg = Config(video_path=None, output_dir="/tmp/x1")
 extra = _narrative_instructions(cfg, is_opening_batch=False, story_hook=None)
-check("mặc định: không thêm hướng dẫn ngôi kể/phong cách nào", extra == "")
+check("mặc định: KHÔNG có dòng ngôi kể (vì narrator_pov rỗng)", "Narrator point of view" not in extra)
+check("mặc định: KHÔNG có hướng dẫn phong cách ĐẶC BIỆT nào (narrative_style='natural' không có extra riêng)",
+      "humorous" not in extra.lower() and "formal" not in extra.lower() and "fantastical" not in extra.lower())
 
 # 2) có narrator_pov → prompt PHẢI chứa đúng câu ngôi kể
 cfg2 = Config(video_path=None, output_dir="/tmp/x2", narrator_pov="Chúng ta")
 prompt2 = build_batch_prompt(cfg2, sample, 0.0, 4.0, 10.0, [])
-check("prompt chứa đúng chỉ dẫn ngôi kể 'Chúng ta'", "Ngôi kể/xưng hô xuyên suốt: Chúng ta." in prompt2)
+check("prompt chứa đúng chỉ dẫn ngôi kể 'Chúng ta'", "Narrator point of view, consistent throughout: Chúng ta." in prompt2)
 
 # 3) phong cách hài hước → prompt có từ khoá "hài hước"
 cfg3 = Config(video_path=None, output_dir="/tmp/x3", narrative_style="humorous")
 prompt3 = build_batch_prompt(cfg3, sample, 0.0, 4.0, 10.0, [])
-check("phong cách 'humorous' → prompt có chỉ dẫn hài hước", "hài hước" in prompt3.lower())
+check("phong cách 'humorous' → prompt có chỉ dẫn hài hước", "humorous" in prompt3.lower())
 
 # 4) fantasy_inspiring, LÔ MỞ ĐẦU (is_first_chunk=True, bi=1) → phải yêu cầu mở đầu bằng câu chuyện giả tưởng
 cfg4 = Config(video_path=None, output_dir="/tmp/x4", narrative_style="fantasy_inspiring")
 prompt4a = build_batch_prompt(cfg4, sample, 0.0, 4.0, 10.0, [], is_opening_batch=True, story_hook=None)
-check("lô mở đầu: yêu cầu MỞ ĐẦU bằng câu chuyện giả tưởng", "CÂU CHUYỆN GIẢ TƯỞNG" in prompt4a)
-check("lô mở đầu: vẫn nhắc phải bám sát hình ảnh cho phần sau", "không được bịa thêm nội dung" in prompt4a)
+check("lô mở đầu: yêu cầu MỞ ĐẦU bằng câu chuyện giả tưởng", "FANTASTICAL STORY" in prompt4a)
+check("lô mở đầu: vẫn nhắc phải bám sát hình ảnh cho phần sau", "must not invent content" in prompt4a)
 
 # 5) fantasy_inspiring, LÔ SAU (không phải mở đầu) với story_hook đã có → phải nhắc Gemini lồng ghép lại, KHÔNG yêu cầu mở đầu mới
 prompt4b = build_batch_prompt(cfg4, sample, 20.0, 24.0, 10.0, [], is_opening_batch=False,
                               story_hook="Một chú robot nhỏ lạc giữa khu rừng công nghệ.")
-check("lô sau: KHÔNG yêu cầu mở đầu mới bằng câu chuyện", "MỞ ĐẦU đoạn thuyết minh ĐẦU TIÊN" not in prompt4b)
+check("lô sau: KHÔNG yêu cầu mở đầu mới bằng câu chuyện", "OPEN the very FIRST narration segment" not in prompt4b)
 check("lô sau: có nhắc lại đúng nội dung câu chuyện mở đầu đã lưu",
       "Một chú robot nhỏ lạc giữa khu rừng công nghệ." in prompt4b)
-check("lô sau: yêu cầu chỉ lồng ghép THỈNH THOẢNG, không phải mọi đoạn", "THỈNH THOẢNG" in prompt4b)
+check("lô sau: yêu cầu chỉ lồng ghép THỈNH THOẢNG, không phải mọi đoạn", "OCCASIONALLY" in prompt4b)
 
 # 6) fantasy_inspiring nhưng chưa có story_hook và KHÔNG phải lô mở đầu (vd sinh lại 1 lô lẻ) → không có hướng dẫn callback nào (an toàn)
 prompt4c = build_batch_prompt(cfg4, sample, 20.0, 24.0, 10.0, [], is_opening_batch=False, story_hook=None)
-check("chưa có story_hook, không phải lô mở đầu → không chèn hướng dẫn callback rác", "CÂU CHUYỆN GIẢ TƯỞNG" not in prompt4c
-      and "THỈNH THOẢNG" not in prompt4c)
+check("chưa có story_hook, không phải lô mở đầu → không chèn hướng dẫn callback rác", "FANTASTICAL STORY" not in prompt4c
+      and "OCCASIONALLY" not in prompt4c)
 
 # 7) validation: narrative_style sai giá trị phải bị từ chối ngay khi tạo Config
 try:

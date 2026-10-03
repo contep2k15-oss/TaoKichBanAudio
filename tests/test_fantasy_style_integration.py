@@ -23,8 +23,8 @@ def check(name, cond):
     print("  ✓", name)
 
 
-HOOK_MARKER = "CÂU CHUYỆN GIẢ TƯỞNG"
-CALLBACK_MARKER = "THỈNH THOẢNG"
+HOOK_MARKER = "FANTASTICAL STORY"
+CALLBACK_MARKER = "OCCASIONALLY"
 seen_prompts: list[tuple[str, str]] = []   # (label, prompt) cho MỌI lần Gemini nhận prompt
 
 
@@ -33,7 +33,7 @@ def fake_reply(req: dict) -> str:
     import re
     prompt = req["prompt"]
     seen_prompts.append(prompt)
-    stamps = [parse_timestamp(m) for m in re.findall(r"Ảnh \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
+    stamps = [parse_timestamp(m) for m in re.findall(r"Image \d+: (\d\d:\d\d:\d\d\.\d+)", prompt)]
     segs = []
     for k, t in enumerate(stamps, start=1):
         # đoạn đầu tiên của TOÀN VIDEO (chunk 0, lô 1): trả về text CỐ ĐỊNH để test nhận diện lại đúng câu hook
@@ -71,7 +71,7 @@ with tempfile.TemporaryDirectory() as d:
           len(callback_prompts) >= 1)
     check("mọi prompt callback đều chứa ĐÚNG nội dung câu chuyện mở đầu đã sinh ra (chú robot lạc giữa rừng dữ liệu)",
           all("chú robot nhỏ lạc giữa khu rừng dữ liệu" in p for p in callback_prompts))
-    batch_prompts = [p for p in seen_prompts if "Ảnh 1:" in p]   # chỉ prompt VIẾT KỊCH BẢN (loại trừ prompt "rút gọn câu")
+    batch_prompts = [p for p in seen_prompts if "Image 1:" in p]   # chỉ prompt VIẾT KỊCH BẢN (loại trừ prompt "rút gọn câu")
     check(f"mọi prompt viết kịch bản (mọi chunk, {len(batch_prompts)} lô) đều có chỉ dẫn ngôi kể 'Người kể chuyện bí ẩn'",
           batch_prompts and all("Người kể chuyện bí ẩn" in p for p in batch_prompts))
 
