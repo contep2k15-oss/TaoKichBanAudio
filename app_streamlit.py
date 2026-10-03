@@ -16,8 +16,47 @@ from config import DEFAULT_GEMINI_MODEL, Config, resolve_voice_choice
 from error_report import build_error_report, save_error_report
 from utils import GeminiWebError, suppress_console_windows
 
-st.set_page_config(page_title="Silent Video Voiceover Creator", page_icon="🎙️", layout="wide")
+st.set_page_config(page_title="Era Voice", page_icon="🎙️", layout="wide")
 suppress_console_windows()  # xem utils.py — bắt buộc để tiến trình con của pydub không tự bật console Windows
+
+# CSS tối thiểu — màu accent + badge (certainty/QA), KHÔNG xây design system riêng, không ảnh hưởng tới cách
+# AppTest tìm widget (mọi selector trong test đều theo label/key, không theo CSS class).
+st.markdown("""
+<style>
+.svvc-badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 0.8em;
+             font-weight: 600; margin: 1px 3px 1px 0; }
+.svvc-badge-fact { background: #1f3a33; color: #72C7B8; }
+.svvc-badge-infer { background: #3a331f; color: #E6C46A; }
+.svvc-badge-creative { background: #2a2033; color: #c9a4f2; }
+.svvc-badge-user { background: #1f2d3a; color: #7bb8e4; }
+.svvc-step-done { color: #72C7B8; }
+.svvc-step-current { color: #F2A36B; font-weight: 600; }
+.svvc-step-todo { color: #6b7278; }
+div.stButton > button[kind="primary"] { background-color: #F2A36B; border-color: #F2A36B; color: #111315; }
+div.stButton > button[kind="primary"]:hover { background-color: #e8935a; border-color: #e8935a; }
+.era-header { display: flex; align-items: center; gap: 10px; padding: 2px 0 14px; border-bottom: 1px solid #23282D;
+             margin-bottom: 18px; flex-wrap: wrap; }
+.era-header .era-name { font-size: 20px; font-weight: 700; color: #F2F4F5; line-height: 1.2; }
+.era-header .era-tagline { font-size: 12.5px; color: #9AA4AD; }
+.era-header .era-author { margin-left: auto; font-size: 12px; color: #6b7278; }
+</style>
+""", unsafe_allow_html=True)
+
+# Header thương hiệu — khớp đúng demo mockup đã duyệt (logo/tên/khẩu hiệu/tác giả)
+st.markdown("""
+<div class="era-header">
+  <svg width="28" height="28" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+    <rect x="1.5" y="1.5" width="23" height="23" rx="6" stroke="#F2A36B" stroke-width="1.6"/>
+    <path d="M5.5 15.5L9 10.5L12.5 16.5L15.5 8.5L19 14.5L21 11.5" stroke="#F2A36B" stroke-width="1.6"
+         fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div style="display: flex; flex-direction: column; line-height: 1.25;">
+    <span class="era-name">Era Voice</span>
+    <span class="era-tagline">Tạo giọng đọc và kịch bản cho mọi video</span>
+  </div>
+  <span class="era-author">bởi Mr Duong</span>
+</div>
+""", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════
 # State
@@ -460,6 +499,111 @@ preview_cfg = build_cfg() if video_ok else None
 current_job = bg.get_job(preview_cfg.workdir) if preview_cfg else None
 running_now = current_job is not None and current_job.state == "running"
 
+
+_CERTAINTY_BADGE_CSS = {"observed_fact": ("svvc-badge-fact", "● Quan sát chắc chắn"),
+                        "safe_inference": ("svvc-badge-infer", "△ Suy luận an toàn"),
+                        "creative_framing": ("svvc-badge-creative", "✦ Cách kể sáng tạo"),
+                        "user_provided_fact": ("svvc-badge-user", "✓ Thông tin người dùng cung cấp")}
+
+
+def _render_script_details(script_path: Path, sync_report_path: Path) -> None:
+    """Hiện 3 mục CHỈ ĐỌC dữ liệu đã có sẵn trong `script.json`/`sync_report.json` — KHÔNG gọi Gemini/TTS gì
+    thêm: badge màu phân loại certainty (giống tài liệu thiết kế — "Fact/Inference/Creative framing"), bảng
+    timeline từng đoạn, và checklist QA dựa trên số liệu pipeline đã tự tính sẵn khi ghép video."""
+    import json as _json
+    try:
+        segments = _json.loads(script_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not segments:
+        return
+
+    with st.expander("📊 Chi tiết kịch bản & QA", expanded=False):
+        # ── Badge phân loại độ tin cậy nội dung ──
+        counts: dict[str, int] = {}
+        for s in segments:
+            c = s.get("certainty", "observed_fact")
+            counts[c] = counts.get(c, 0) + 1
+        badges = "".join(f'<span class="svvc-badge {css}">{label}: {counts[key]}</span>'
+                         for key, (css, label) in _CERTAINTY_BADGE_CSS.items() if counts.get(key))
+        if badges:
+            st.markdown(badges, unsafe_allow_html=True)
+
+        # ── Bảng timeline từng đoạn ──
+        st.caption(f"{len(segments)} đoạn kịch bản")
+        rows = [{"#": s.get("id", i + 1), "Bắt đầu": s.get("start_time", ""), "Kết thúc": s.get("end_time", ""),
+                "Giọng điệu": s.get("tone", ""),
+                "Nội dung": (s.get("text", "")[:80] + "…") if len(s.get("text", "")) > 80 else s.get("text", "")}
+               for i, s in enumerate(segments)]
+        st.dataframe(rows, hide_index=True, use_container_width=True)
+
+        # ── Checklist QA — dựa trên sync_report.json nếu có (pipeline đã tự tính khi ghép video) ──
+        if sync_report_path.is_file():
+            try:
+                report = _json.loads(sync_report_path.read_text(encoding="utf-8"))
+                summary = report.get("summary", {})
+            except (OSError, ValueError):
+                summary = None
+            if summary is not None:
+                st.markdown("**Kiểm tra chất lượng (QA)**")
+                checks = [
+                    ("Không có đoạn nào lệch nhịp quá ngưỡng", summary.get("start_drift_over_tolerance", 0) == 0,
+                     f"{summary.get('start_drift_over_tolerance', 0)} đoạn lệch"),
+                    ("Không có đoạn nào bị cắt bớt vì quá dài", summary.get("clipped", 0) == 0,
+                     f"{summary.get('clipped', 0)} đoạn bị cắt"),
+                    ("Không có đoạn nào chồng lấn nhau", summary.get("overlaps", 0) == 0,
+                     f"{summary.get('overlaps', 0)} đoạn chồng lấn"),
+                    ("Không có đoạn nào vượt quá khung hình", summary.get("overruns", 0) == 0,
+                     f"{summary.get('overruns', 0)} đoạn vượt khung"),
+                ]
+                for label, ok, detail in checks:
+                    (st.success if ok else st.warning)(f"{'✓' if ok else '△'} {label}" + ("" if ok else f" — {detail}"))
+
+
+def _render_step_navigation(cfg: Config | None) -> None:
+    """Thanh tiến độ 5 bước trong sidebar — CHỈ ĐỌC, dùng ĐÚNG dữ liệu checkpoint thật đã có sẵn
+    (`pipeline_status.py`, vốn xây cho đúng mục đích "người dùng biết đang xử lý tới đâu"), KHÔNG bịa thêm
+    một state machine UI riêng tách khỏi backend thật — tránh hiển thị sai lệch với tiến độ thực tế."""
+    steps = [("video", "Video"), ("extract", "Trích hình ảnh"), ("script", "Kịch bản"),
+             ("tts", "Giọng đọc"), ("done", "Hoàn tất")]
+    from checkpoint import Stage
+    status = None
+    if cfg is not None:
+        try:
+            import pipeline_status
+            status = pipeline_status.read_status(cfg)
+        except Exception:  # noqa: BLE001 — chỉ để hiển thị, lỗi ở đây không được chặn phần còn lại của trang
+            status = None
+
+    # n_complete = SỐ BƯỚC ĐÃ XONG HẲN (không phải "bước đang đứng") — bước kế tiếp (nếu còn) mới là bước
+    # HIỆN TẠI (▶️). Tính tuần tự, mỗi bước chỉ "mở khoá" tính tiếp nếu bước trước đã xong — tránh lỗi đã
+    # gặp khi test: kịch bản xong rồi mà mốc hiện tại vẫn đứng ở "Kịch bản" thay vì nhảy sang "Giọng đọc".
+    n_complete = 0
+    if cfg is not None:
+        n_complete = 1
+        if status is not None and status.chunks:
+            if all(c.has(Stage.EXTRACTED) for c in status.chunks):
+                n_complete = 2
+                if status.all_scripts_ready:
+                    n_complete = 3
+                    if status.all_tts_ready:
+                        n_complete = 4
+                        if status.n_done == status.n_total:
+                            n_complete = 5
+
+    lines = []
+    for i, (key, label) in enumerate(steps):
+        icon, css = ("✅", "svvc-step-done") if i < n_complete else \
+            ("▶️", "svvc-step-current") if i == n_complete else ("○", "svvc-step-todo")
+        lines.append(f'<div class="{css}">{icon} {i + 1:02d} · {label}</div>')
+    st.sidebar.markdown("---\n**Tiến độ**")
+    st.sidebar.markdown("\n".join(lines), unsafe_allow_html=True)
+    if status is not None:
+        st.sidebar.caption(status.summary_line())
+
+
+_render_step_navigation(preview_cfg)
+
 with st.expander("🔍 Xem trước nhanh (không bắt buộc)"):
     st.caption("Cắt một đoạn ngắn đầu video, chạy THẬT qua Gemini + giọng đọc + ghép — để nghe thử giọng/"
               "nhịp/phong cách TRƯỚC khi chờ cả video dài. Dùng ĐÚNG mọi lựa chọn bạn đã chọn ở trên.")
@@ -587,6 +731,8 @@ if current_job is not None:
             st.json(_json.loads(Path(script).read_text(encoding="utf-8")), expanded=False)
         else:
             st.info(f"Đã dừng đúng theo giai đoạn đã chọn ({label}). Bấm nút giai đoạn tiếp theo khi sẵn sàng.")
+        if script and Path(script).is_file():
+            _render_script_details(Path(script), preview_cfg.sync_report_path)
         st.caption(f"Thư mục kết quả: `{out_dir}` — thư mục làm việc/log: `{workdir}`")
         with st.expander("Nhật ký chi tiết"):
             log_path = preview_cfg.log_path
