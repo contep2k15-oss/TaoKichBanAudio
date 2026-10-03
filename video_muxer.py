@@ -171,12 +171,18 @@ def concat_wavs(wav_paths: list[Path], out_wav: Path, workdir: Path) -> None:
 
 
 def mux_video_streaming(cfg: Config, media: MediaInfo, chunk_windows: list[tuple[float, float]],
-                        chunk_voice_paths: list[Path]) -> None:
+                        chunk_voice_paths: list[Path],
+                        planned_ranges_sec: list[list[tuple[float, float]]] | None = None) -> None:
     """Ducking + mux cho video dài, xử lý TỪNG CHUNK một, bộ nhớ không phụ thuộc độ dài video.
 
     `chunk_windows[i]` = (start_sec, end_sec) của macro-chunk thứ i (từ chunk_planner.plan_macro_chunks).
     `chunk_voice_paths[i]` = file audio giọng đọc ĐÃ GHÉP SẴN cho đúng chunk đó (từ audio_assembler,
     thời lượng = end_sec - start_sec), do long_video_pipeline.py tạo ra ở bước 04_assembled của mỗi chunk.
+    `planned_ranges_sec[i]`: mốc (start_sec, end_sec) TUYỆT ĐỐI của MỌI đoạn kịch bản thuộc chunk i — kể cả
+    đoạn TTS bị lỗi (không có tiếng thật trong file voice). Hạ âm lượng gốc DỰA VÀO CẢ danh sách này, không
+    chỉ dựa vào chỗ thực sự có tiếng trong file voice (`_voice_ranges`) — nếu không, đoạn nào lỡ mất giọng
+    đọc (TTS lỗi) sẽ để lộ NGUYÊN VĂN âm thanh gốc ở mức 100%, nghe như tiếng nước ngoài xen giữa phần đã
+    lồng tiếng. Optional để không phá các lời gọi cũ (vd test) chưa truyền tham số này.
     """
     if len(chunk_windows) != len(chunk_voice_paths):
         raise PipelineError("Số chunk và số file voice không khớp.")
@@ -187,8 +193,13 @@ def mux_video_streaming(cfg: Config, media: MediaInfo, chunk_windows: list[tuple
         for i, (start, end) in enumerate(chunk_windows):
             log.info("Ducking + mix chunk %d/%d (%.1fs–%.1fs)...", i + 1, len(chunk_windows), start, end)
             voice = AudioSegment.from_file(chunk_voice_paths[i])
+            ranges = [tuple(r) for r in _voice_ranges(voice)]
+            if planned_ranges_sec is not None and i < len(planned_ranges_sec):
+                planned_local_ms = [(round((s - start) * 1000), round((e - start) * 1000))
+                                    for s, e in planned_ranges_sec[i]]
+                ranges = _merge_ranges(ranges + planned_local_ms, MERGE_GAP_MS)
             out_wav = scratch_dir / f"mixed_{i:04d}.wav"
-            mix_one_chunk(cfg, media, start, end, voice, _voice_ranges(voice), out_wav, scratch_dir / f"bgm_{i:04d}.wav")
+            mix_one_chunk(cfg, media, start, end, voice, ranges, out_wav, scratch_dir / f"bgm_{i:04d}.wav")
             mixed_paths.append(out_wav)
             del voice
         final_wav = cfg.workdir / "mixed_audio.wav"
