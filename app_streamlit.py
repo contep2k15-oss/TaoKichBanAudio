@@ -26,7 +26,9 @@ DEFAULTS = {
     "video_path": "", "youtube_url": "", "youtube_max_height": 1080, "output_dir": "", "engine": "web", "browser_channel": "chrome",
     "web_model_hint": "Flash|Fast|Nhanh", "gemini_model": DEFAULT_GEMINI_MODEL, "api_key": "",
     "tts_engine": "edge", "language": "vi", "voice": "", "style": Config.style,
-    "narrator_pov": "", "narrative_style": "natural",
+    "narrator_pov": "", "narrative_style": "natural", "narration_mode": "per_scene",
+    "narration_purpose": "neutral", "creativity_level": 0.3, "export_srt": False, "enable_story_plan": False,
+    "enable_whisper_alignment": False, "whisper_model_size": "small",
     "elevenlabs_api_key": "", "elevenlabs_model": "eleven_multilingual_v2",
     "mode": "interval", "interval": 2.5, "scene_threshold": 0.35,
     "chunk_minutes": 4.0,
@@ -63,6 +65,11 @@ def build_cfg(*, stop_after: int | None = None) -> Config:
         tts_engine=st.session_state.tts_engine, language=st.session_state.language,
         voice=st.session_state.voice or None, style=st.session_state.style,
         narrator_pov=st.session_state.narrator_pov, narrative_style=st.session_state.narrative_style,
+        narration_mode=st.session_state.narration_mode, narration_purpose=st.session_state.narration_purpose,
+        creativity_level=st.session_state.creativity_level, export_srt=st.session_state.export_srt,
+        enable_story_plan=st.session_state.enable_story_plan,
+        enable_whisper_alignment=st.session_state.enable_whisper_alignment,
+        whisper_model_size=st.session_state.whisper_model_size,
         elevenlabs_api_key=st.session_state.elevenlabs_api_key or None, elevenlabs_model=st.session_state.elevenlabs_model,
         extract_mode=st.session_state.mode, frame_interval_sec=st.session_state.interval,
         scene_threshold=st.session_state.scene_threshold, chunk_target_sec=st.session_state.chunk_minutes * 60.0,
@@ -165,6 +172,47 @@ with st.sidebar:
         st.caption("💡 Video sẽ mở đầu bằng một câu chuyện giả tưởng ngắn để dẫn dắt, rồi thỉnh thoảng nhắc lại "
                   "xuyên suốt để giữ mạch cảm xúc.")
     st.session_state.style = st.text_area("Mô tả phong cách chi tiết (tự do)", st.session_state.style, height=70)
+
+    purpose_labels = {"neutral": "Mô tả trung lập", "documentary": "Kể chuyện tài liệu", "emotional": "Kể chuyện cảm xúc",
+                      "educational": "Giải thích/giáo dục", "review": "Review/phân tích", "ad": "Quảng cáo sản phẩm",
+                      "social_short": "Video ngắn mạng xã hội", "light_humor": "Hài nhẹ"}
+    st.selectbox("Mục đích narration", list(purpose_labels), format_func=lambda k: purpose_labels[k],
+                key="narration_purpose",
+                help="Mục đích video khác nhau cần cách kể hoàn toàn khác — độc lập với 'Phong cách kể "
+                     "chuyện' bên dưới (phong cách chỉ quyết định giọng văn hài hước/trang trọng).")
+    st.slider("Mức độ sáng tạo", 0.0, 1.0, key="creativity_level",
+             help="0.0 = chỉ mô tả trung lập điều nhìn thấy. 1.0 = được viết mang tính văn chương/liên tưởng "
+                  "— dù ở mức nào, Gemini luôn được dặn KHÔNG tự đặt tên riêng/địa điểm/sự kiện có thật nếu "
+                  "hình ảnh không chứng minh được.")
+
+    mode_labels = {"per_scene": "Theo từng khoảnh khắc (mặc định)", "continuous": "Đọc liên tục (tự nhiên hơn)"}
+    st.selectbox(
+        "Cách đọc", list(mode_labels), format_func=lambda k: mode_labels[k], key="narration_mode",
+        help="'Theo từng khoảnh khắc': mỗi câu bám sát 1 khung hình cụ thể, chính xác nhưng có thể nghe hơi "
+             "khựng/rời rạc giữa các câu. 'Đọc liên tục': gộp mỗi lô ảnh (~16-20s) thành MỘT đoạn văn liền "
+             "mạch, giọng đọc tự nhiên hơn hẳn (giữ nguyên dấu câu để bộ đọc tự ngắt nghỉ) — đổi lại KHÔNG "
+             "còn bám chính xác từng khung hình nhỏ bên trong lô, chỉ khớp đầu/cuối cả lô.")
+    if st.session_state.narration_mode == "continuous":
+        st.caption("💡 Chỉ còn nghỉ giữa các LÔ (~16-20 giây/lần) thay vì nghỉ giữa MỌI câu như chế độ mặc định.")
+
+    st.checkbox("Lập dàn ý tổng thể trước khi viết lời (chậm hơn)", key="enable_story_plan",
+               help="Thêm 1 lượt gọi Gemini/chunk lớn để lập dàn ý (mở đầu/phát triển/cao trào/kết) trước "
+                    "khi viết lời chi tiết từng lô nhỏ — kịch bản mạch lạc hơn, đổi lại tăng thời gian chờ.")
+    st.checkbox("Xuất thêm phụ đề .srt", key="export_srt",
+               help="Dùng thẳng mốc thời gian đã có trong kịch bản — không cần nhận dạng lại giọng đọc. Ở "
+                    "chế độ 'Đọc liên tục', mỗi đoạn văn dài được tự chia theo câu để phụ đề dễ đọc hơn "
+                    "(mốc thời gian từng câu con là ước lượng theo độ dài câu, không phải đo chính xác).")
+    if st.session_state.export_srt:
+        st.checkbox("Tinh chỉnh phụ đề bằng Whisper (chính xác hơn, chậm hơn, cần cài thêm)", key="enable_whisper_alignment",
+                   help="Nghe lại chính video đã tổng hợp để đo CHÍNH XÁC mốc từng câu, thay cho ước lượng "
+                        "theo độ dài câu. Cần cài thêm: `pip install faster-whisper`. ⚠️ Tính năng MỚI, chưa "
+                        "được kiểm chứng kỹ — nếu lỗi, phụ đề tự động quay về bản ước lượng, không ảnh "
+                        "hưởng gì tới video/audio chính.")
+        if st.session_state.enable_whisper_alignment:
+            st.selectbox("Kích thước model Whisper", ["tiny", "base", "small", "medium", "large-v3"],
+                        key="whisper_model_size",
+                        help="Model càng lớn càng chính xác nhưng càng chậm/tốn bộ nhớ hơn. 'small' là mức "
+                             "cân bằng hợp lý cho việc nghe lại giọng máy (rõ ràng hơn giọng người thật).")
 
     st.subheader("🎬 Chỉ giữ cảnh hay")
     st.session_state.highlight_mode = st.checkbox("Chỉ giữ lại những cảnh đắt giá và thêm thuyết minh, cắt bỏ phần thừa",
@@ -321,6 +369,30 @@ def _start_background(cfg: Config) -> None:
     bg.start_job(cfg.workdir, _run, stop_after=cfg.stop_after)
 
 
+def _preview_workdir(cfg: Config) -> Path:
+    """Đúng workdir mà `preview.build_preview_config()` sẽ tính ra — tính TRƯỚC (không cần video đã cắt
+    thật) để tra cứu job nền đang chạy cho ĐÚNG mục xem trước, tách biệt hoàn toàn khỏi job chạy chính (2
+    workdir khác nhau → 2 job độc lập trong `background_jobs.py`, không tranh chấp/chặn lẫn nhau)."""
+    return cfg.output_dir / "preview" / "work"
+
+
+def _start_preview_background(cfg: Config, seconds: float) -> None:
+    """Y hệt `_start_background()` nhưng chạy `preview.run_preview()` thay vì pipeline đầy đủ — xem trước
+    cũng là tác vụ tốn thời gian (gọi Gemini + TTS), PHẢI chạy nền giống hệt lý do đã giải thích ở trên,
+    nếu không sẽ gặp lại đúng lỗi "Lần chạy bị NGẮT giữa chừng" khi người dùng thao tác gì khác trong lúc chờ."""
+    import preview as preview_mod
+    pv_workdir = _preview_workdir(cfg)
+    pv_workdir.mkdir(parents=True, exist_ok=True)
+    bg.clear_job(pv_workdir)
+
+    def _run(job: bg.JobStatus) -> dict:
+        def on_step(n: int, title: str) -> None:
+            job.current_step = f"Bước {n} — {title}"
+        return preview_mod.run_preview(cfg, seconds=seconds, on_step=on_step, interactive=False)
+
+    bg.start_job(pv_workdir, _run, stop_after=None)
+
+
 # ════════════════════════════════════════════════════════════
 # Khu vực 3: trạng thái hiện có (đọc, KHÔNG chạy gì) — biết ngay đang xử lý tới đâu trước khi bấm nút nào
 # ════════════════════════════════════════════════════════════
@@ -387,6 +459,30 @@ import background_jobs as bg  # noqa: E402
 preview_cfg = build_cfg() if video_ok else None
 current_job = bg.get_job(preview_cfg.workdir) if preview_cfg else None
 running_now = current_job is not None and current_job.state == "running"
+
+with st.expander("🔍 Xem trước nhanh (không bắt buộc)"):
+    st.caption("Cắt một đoạn ngắn đầu video, chạy THẬT qua Gemini + giọng đọc + ghép — để nghe thử giọng/"
+              "nhịp/phong cách TRƯỚC khi chờ cả video dài. Dùng ĐÚNG mọi lựa chọn bạn đã chọn ở trên.")
+    preview_sec_choice = st.slider("Số giây xem trước", 5, 60, 25, 5)
+    pv_workdir_now = _preview_workdir(preview_cfg) if preview_cfg else None
+    pv_job = bg.get_job(pv_workdir_now) if pv_workdir_now else None
+    pv_running = pv_job is not None and pv_job.state == "running"
+    if st.button("🔍 Tạo xem trước", disabled=not video_ok or pv_running or running_now):
+        _start_preview_background(build_cfg(), preview_sec_choice)
+        st.rerun()
+    if pv_job is not None:
+        if pv_job.state == "running":
+            st.info(f"🟢 Đang tạo xem trước... {pv_job.current_step}")
+            if st.button("🔄 Cập nhật", key="pv_refresh"):
+                st.rerun()
+        elif pv_job.state == "error":
+            st.error(f"Xem trước lỗi: {pv_job.error.splitlines()[0] if pv_job.error else '?'}")
+        elif pv_job.state == "done":
+            pv_video = (pv_job.result or {}).get("video")
+            if pv_video and Path(pv_video).is_file():
+                st.video(str(pv_video))
+            else:
+                st.info("Đoạn xem trước không có nội dung đáng thuyết minh (video tĩnh/không có gì đáng nói).")
 
 b1, b2, b3, b4 = st.columns(4)
 run_plan = b1.button("① Phân đoạn", disabled=not video_ok or running_now, use_container_width=True,
@@ -469,6 +565,7 @@ if current_job is not None:
         result = current_job.result or {}
         out_dir, workdir = str(preview_cfg.output_dir), str(preview_cfg.workdir)
         video, voiceover, script = result.get("video"), result.get("voiceover"), result.get("script")
+        srt = result.get("srt")
         if video and Path(video).is_file():
             left, right = st.columns([3, 2])
             with left:
@@ -480,6 +577,8 @@ if current_job is not None:
                                        Path(voiceover).name, "audio/mpeg")
                 if script and Path(script).is_file():
                     st.download_button("⬇️ Tải script.json", Path(script).read_bytes(), Path(script).name, "application/json")
+                if srt and Path(srt).is_file():
+                    st.download_button("⬇️ Tải phụ đề .srt", Path(srt).read_bytes(), Path(srt).name, "text/plain")
         elif script and Path(script).is_file():
             st.info("Đã tạo xong kịch bản. Mở file, sửa nếu cần, rồi bấm '④ Hoàn tất' để chạy tiếp (sẽ tự "
                    "dùng lại kịch bản này, không tốn công gọi lại Gemini).")

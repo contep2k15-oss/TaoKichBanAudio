@@ -137,6 +137,32 @@ def build_parser() -> argparse.ArgumentParser:
                    "để trống = để Gemini tự chọn")
     g.add_argument("--narrative-style", choices=["natural", "humorous", "formal", "fantasy_inspiring"], default="natural",
                    help="'fantasy_inspiring' = mở đầu bằng câu chuyện giả tưởng, thỉnh thoảng nhắc lại xuyên suốt video")
+    g.add_argument("--narration-mode", choices=["per_scene", "continuous"], default="per_scene",
+                   help="'per_scene' (mặc định) = mỗi câu bám 1 khung hình cụ thể. 'continuous' = gộp mỗi lô "
+                   "ảnh thành 1 đoạn văn liền mạch, giọng đọc tự nhiên hơn, đổi lại không còn bám chính xác "
+                   "từng khung hình nhỏ bên trong lô.")
+    g.add_argument("--narration-purpose", choices=["neutral", "documentary", "emotional", "educational",
+                   "review", "ad", "social_short", "light_humor"], default="neutral",
+                   help="Mục đích video — độc lập với --narrative-style (style chỉ quyết định giọng văn)")
+    g.add_argument("--creativity-level", type=float, default=0.3,
+                   help="0.0 = chỉ mô tả trung lập, 1.0 = sáng tác tự do hơn (vẫn không được bịa tên riêng/"
+                   "sự kiện có thật)")
+    g.add_argument("--story-plan", action="store_true",
+                   help="Thêm 1 lượt gọi Gemini/chunk lập dàn ý tổng thể (mở đầu/phát triển/cao trào/kết) "
+                   "TRƯỚC khi viết lời chi tiết — kịch bản mạch lạc hơn, đổi lại chậm hơn (phiên bản NHẸ "
+                   "của '3-pass Gemini' — không tách riêng từng lô nhỏ)")
+    g.add_argument("--export-srt", action="store_true",
+                   help="Xuất thêm output.srt (dùng thẳng mốc thời gian đã có trong kịch bản, không cần "
+                   "Whisper/nhận dạng lại giọng đọc)")
+    g.add_argument("--whisper-alignment", action="store_true",
+                   help="Tinh chỉnh mốc phụ đề .srt bằng Whisper nghe lại video đã tổng hợp (cần "
+                   "--export-srt VÀ cài thêm `pip install faster-whisper`) — CHƯA được kiểm chứng kỹ bằng "
+                   "Whisper thật, có thể gặp lỗi lần đầu chạy; không ảnh hưởng gì tới video/audio chính")
+    g.add_argument("--whisper-model", choices=["tiny", "base", "small", "medium", "large-v3"], default="small",
+                   help="Kích thước model Whisper (chỉ có tác dụng cùng --whisper-alignment)")
+    g.add_argument("--preview", type=float, default=None, metavar="GIÂY",
+                   help="CHỈ xem trước GIÂY đầu video (cắt ngắn, chạy trọn pipeline trên đoạn đó, lưu "
+                   "riêng ở <output_dir>/preview/, không đụng output chính) — không chạy toàn bộ video.")
 
     g = p.add_argument_group("trích frame & kịch bản")
     g.add_argument("--mode", choices=["interval", "scene"], default="interval")
@@ -224,6 +250,10 @@ def main(argv: list[str] | None = None) -> int:
                      language=args.language, tts_engine=args.tts_engine, voice=args.voice,
                      elevenlabs_api_key=args.elevenlabs_api_key, elevenlabs_model=args.elevenlabs_model,
                      style=args.style, narrator_pov=args.narrator_pov, narrative_style=args.narrative_style,
+                     narration_mode=args.narration_mode, narration_purpose=args.narration_purpose,
+                     creativity_level=args.creativity_level, export_srt=args.export_srt,
+                     enable_story_plan=args.story_plan, enable_whisper_alignment=args.whisper_alignment,
+                     whisper_model_size=args.whisper_model,
                      extract_mode=args.mode, frame_interval_sec=args.interval,
                      scene_threshold=args.scene_threshold, frames_per_prompt=args.frames_per_prompt,
                      max_frames=args.max_frames, words_per_sec=args.wps,
@@ -249,6 +279,14 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_login(cfg)
         if args.check_web:
             return cmd_check_web(cfg)
+        if args.preview is not None:
+            import preview
+            out = preview.run_preview(cfg, seconds=args.preview)
+            if out["video"]:
+                log.info("✔ Xem trước xong → %s", out["video"])
+            else:
+                log.warning("Đoạn xem trước không có nội dung đáng thuyết minh (video tĩnh/không có gì đáng nói).")
+            return 0
         run_pipeline(cfg)
         return 0
     except (WebAuthError, GeminiWebError, PipelineError) as e:

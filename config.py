@@ -96,6 +96,30 @@ class Config:
     style: str = "tự nhiên, truyền cảm, như đang kể chuyện cho người xem"
     narrator_pov: str = ""                   # ngôi kể (vd "Tôi", "Chúng ta", "Người quan sát") — rỗng = để Gemini tự chọn
     narrative_style: str = "natural"         # "natural" | "humorous" | "formal" | "fantasy_inspiring"
+    narration_mode: str = "per_scene"        # "per_scene" (mặc định, hiện có — mỗi câu bám 1 khoảnh khắc cụ
+                                              # thể) | "continuous" (viết liền mạch cả lô ảnh thành 1 đoạn
+                                              # văn — giọng đọc tự nhiên hơn, đổi lại KHÔNG còn bám sát từng
+                                              # khung hình nhỏ bên trong lô, chỉ còn khớp đầu/cuối cả lô)
+    narration_purpose: str = "neutral"       # "neutral" | "documentary" | "emotional" | "educational" |
+                                              # "review" | "ad" | "social_short" | "light_humor" — MỤC ĐÍCH
+                                              # video (độc lập với narrative_style — style chỉ quyết định
+                                              # giọng văn hài hước/trang trọng, không quyết định mục đích)
+    creativity_level: float = 0.3            # 0.0 bám sát hình ảnh ↔ 1.0 sáng tác tự do (xem script_generator
+                                              # ._creativity_instruction để biết chính xác từng mốc)
+    export_srt: bool = False                 # xuất thêm output.srt bên cạnh video — dùng THẲNG mốc thời gian
+                                              # đã có trong kịch bản, KHÔNG cần Whisper/forced-alignment
+    enable_story_plan: bool = False          # bật thêm ĐÚNG 1 lượt gọi Gemini/chunk để lập dàn ý tổng thể
+                                              # (mở đầu/phát triển/cao trào/kết) TRƯỚC khi viết lời chi tiết
+                                              # — bản NHẸ của "3-pass Gemini" (không tách 3 lượt/LÔ NHỎ, chỉ
+                                              # thêm 1 lượt/CHUNK LỚN) — tăng thời gian chờ, mặc định TẮT
+    enable_whisper_alignment: bool = False   # tinh chỉnh mốc phụ đề .srt bằng Whisper nghe lại audio TTS đã
+                                              # tổng hợp (thay cho ước lượng theo ký tự) — CẦN cài thêm
+                                              # `faster-whisper` VÀ `export_srt=True` mới có tác dụng; PHẦN
+                                              # NÀY CHƯA ĐƯỢC KIỂM CHỨNG bằng Whisper thật (xem cảnh báo đầu
+                                              # forced_alignment.py) — mặc định TẮT, KHÔNG ảnh hưởng gì tới
+                                              # việc đặt audio lên video (chỉ ảnh hưởng độ chính xác phụ đề)
+    whisper_model_size: str = "small"        # "tiny"|"base"|"small"|"medium"|"large-v3" — model càng lớn
+                                              # càng chính xác nhưng càng chậm/tốn bộ nhớ hơn
 
     # ── Trích xuất frame ──────────────────────────────────
     extract_mode: str = "interval"           # "interval" | "scene"
@@ -156,7 +180,6 @@ class Config:
 
     # ── Điều khiển ────────────────────────────────────────
     script_file: Path | None = None
-    youtube_url: str | None = None           # thay vì video local: gửi thẳng link cho Gemini Web viết kịch bản
     force: bool = False
     force_chunk: int | None = None           # chỉ làm lại (bỏ qua checkpoint) MỘT chunk cụ thể, theo index
     stop_after: int | None = None
@@ -198,6 +221,15 @@ class Config:
             raise ValueError("max_advance_sec phải nằm trong [0, 5]")
         if self.narrative_style not in ("natural", "humorous", "formal", "fantasy_inspiring"):
             raise ValueError("narrative_style phải là 'natural', 'humorous', 'formal' hoặc 'fantasy_inspiring'")
+        if self.narration_mode not in ("per_scene", "continuous"):
+            raise ValueError("narration_mode phải là 'per_scene' hoặc 'continuous'")
+        if self.whisper_model_size not in ("tiny", "base", "small", "medium", "large-v3"):
+            raise ValueError("whisper_model_size không hợp lệ")
+        if self.narration_purpose not in ("neutral", "documentary", "emotional", "educational", "review",
+                                          "ad", "social_short", "light_humor"):
+            raise ValueError("narration_purpose không hợp lệ")
+        if not 0.0 <= self.creativity_level <= 1.0:
+            raise ValueError("creativity_level phải nằm trong [0, 1]")
         if not 0.0 < self.highlight_target_ratio <= 1.0:
             raise ValueError("highlight_target_ratio phải nằm trong (0, 1]")
         if self.youtube_url and self.highlight_mode:
@@ -248,6 +280,8 @@ class Config:
     def log_path(self) -> Path: return self.workdir / "pipeline.log"
     @property
     def script_path(self) -> Path: return self.output_dir / "script.json"
+    @property
+    def srt_path(self) -> Path: return self.output_dir / "output.srt"
     @property
     def sync_report_path(self) -> Path: return self.output_dir / "sync_report.json"
     @property

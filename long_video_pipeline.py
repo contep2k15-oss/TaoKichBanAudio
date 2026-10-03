@@ -284,6 +284,16 @@ def _save_aggregate_script(cfg: Config, segments_by_chunk: list[list[ScriptSegme
             out.append(d)
     write_json(cfg.script_path, out)
     log.info("Đã gộp kịch bản của %d chunk → %s (%d đoạn).", len(segments_by_chunk), cfg.script_path, len(out))
+    if cfg.export_srt:
+        # Xuất SRT SỚM bằng ước lượng theo ký tự (chưa cần audio thật — dùng được ngay cả khi dừng ở
+        # stop_after=2, trước khi có audio). Nếu bật Whisper alignment, bản này sẽ được GHI ĐÈ bằng bản
+        # chính xác hơn SAU KHI audio cuối thực sự tồn tại (xem phía dưới, sau mux_video_streaming) — KHÔNG
+        # thể làm ở đây vì audio CHƯA được tổng hợp tại điểm này trong pipeline.
+        import subtitles
+        all_segments = [s for chunk_segments in segments_by_chunk for s in chunk_segments]
+        srt_text = subtitles.build_srt(all_segments)
+        cfg.srt_path.write_text(srt_text, encoding="utf-8")
+        log.info("Đã xuất phụ đề → %s (%d mục).", cfg.srt_path, srt_text.count("-->"))
 
 
 def _aggregate_sync_report(cfg: Config, chunks: list[MacroChunk]) -> None:
@@ -484,7 +494,7 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
              "Video ngắn hơn ngưỡng chia chunk → xử lý như 1 chunk duy nhất.", checkpoint.resume_summary(len(chunks)))
     _check_cancel()  # ngay sau highlight+phân đoạn — không phải đợi tới hết vòng lặp chunk mới nhận ra đã bị yêu cầu dừng
 
-    outputs: dict[str, Path | None] = {"script": None, "voiceover": None, "video": None}
+    outputs: dict[str, Path | None] = {"script": None, "voiceover": None, "video": None, "srt": None}
     if cfg.stop_after == 0:                              # chỉ muốn xem kế hoạch chia chunk, chưa gọi Gemini/TTS
         return outputs
     for c in chunks:
@@ -540,7 +550,8 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
                 gc.collect()
 
     outputs["script"] = cfg.script_path
-    _save_aggregate_script(cfg, segments_by_chunk)
+    _save_aggregate_script(cfg, segments_by_chunk)   # ghi script.json VÀ output.srt (nếu export_srt) — PHẢI
+    outputs["srt"] = cfg.srt_path if cfg.export_srt and cfg.srt_path.is_file() else None  # chạy TRƯỚC dòng này
     if cfg.stop_after == 2:
         log.info("Dừng sau khi tạo kịch bản theo yêu cầu (--stop-after 2). Sửa xong, chạy lại đúng lệnh này để "
                 "tiếp tục — các chunk đã có kịch bản sẽ không gọi lại Gemini. Kịch bản: %s", cfg.script_path)
@@ -571,10 +582,30 @@ def run(cfg: Config, *, on_chunk_progress: Callable[[int, int], None] | None = N
     if on_step:
         on_step(4, "Ghép & Mux")
     windows = [(c.start_sec, c.end_sec) for c in chunks]
-    video_muxer.mux_video_streaming(cfg, media, windows, chunk_audio_paths)
+    planned_ranges = [[(s.start_sec, s.end_sec) for s in segs] for segs in segments_by_chunk]
+    video_muxer.mux_video_streaming(cfg, media, windows, chunk_audio_paths, planned_ranges)
     outputs["voiceover"] = cfg.voiceover_path
     outputs["video"] = cfg.final_video_path
     _aggregate_sync_report(cfg, chunks)
+
+    if cfg.export_srt and cfg.enable_whisper_alignment and cfg.final_video_path.is_file():
+        # GIỜ video cuối đã có thật trên đĩa (mux vừa xong ở trên) — thử tinh chỉnh lại .srt bằng Whisper,
+        # GHI ĐÈ bản ước lượng đã xuất sớm ở trên. Lỗi ở đây KHÔNG được chặn pipeline (video đã xong) — giữ
+        # nguyên bản .srt ước lượng cũ nếu Whisper thất bại.
+        # LƯU Ý: dùng THẲNG `cfg.final_video_path` (video .mp4 hoàn chỉnh), KHÔNG dùng `cfg.voiceover_path`
+        # (final_voiceover.mp3) — file đó CHỈ tồn tại khi xử lý video NGẮN (1 chunk, không qua đường ghép
+        # streaming); với video dài nhiều chunk, audio cuối được trộn THẲNG vào file video, không xuất ra
+        # file mp3 riêng. `faster-whisper` đọc được video trực tiếp (tự tách audio bên trong qua ffmpeg),
+        # nên dùng file video luôn CHẮC CHẮN tồn tại sau khi mux xong, bất kể 1 hay nhiều chunk.
+        import subtitles
+        all_segments = [s for chunk_segments in segments_by_chunk for s in chunk_segments]
+        aligned_cues = subtitles.try_whisper_alignment(all_segments, cfg.final_video_path, language=cfg.language,
+                                                       model_size=cfg.whisper_model_size)
+        log.info("Tinh chỉnh phụ đề bằng Whisper: %s.", "thành công, đã ghi đè .srt" if aligned_cues is not None
+                else "không khả dụng/thất bại — giữ nguyên bản ước lượng theo ký tự")
+        if aligned_cues is not None:
+            srt_text2 = subtitles.build_srt(all_segments, aligned_cues=aligned_cues)
+            cfg.srt_path.write_text(srt_text2, encoding="utf-8")
 
     if not cfg.keep_temp:
         for f in cfg.frames_dir.rglob("frame_*.jpg"):
