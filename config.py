@@ -140,7 +140,13 @@ class Config:
     max_rewrite_rounds: int = 2
 
     # ── TTS ───────────────────────────────────────────────
-    tts_concurrency: int = 4
+    tts_concurrency: int = 2                 # giảm từ 4 → 2: gọi 4 kết nối WebSocket đồng thời tới Edge-TTS
+                                              # liên tục hết lô này tới lô khác (không nghỉ) dễ bị Microsoft
+                                              # coi là bất thường và trả lỗi hàng loạt "NoAudioReceived" —
+                                              # xem thêm tts_stagger_sec bên dưới
+    tts_stagger_sec: float = 0.25            # nghỉ NHỎ trước mỗi lệnh gọi Edge-TTS thực tế (không tính các
+                                              # đoạn đã có sẵn trong cache) — dãn các kết nối ra theo thời
+                                              # gian thay vì bắn đồng loạt ngay khi có slot trống
     tts_retries: int = 4
     tts_timeout_sec: float = 60.0
     max_speedup: float = 1.25

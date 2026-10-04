@@ -72,7 +72,7 @@ DEFAULTS = {
     "mode": "interval", "interval": 2.5, "scene_threshold": 0.35,
     "chunk_minutes": 4.0,
     "bgm_duck": 0.15,   # khớp mặc định mới của Config.bgm_duck_ratio (hạ mạnh vì đa số nguồn có lời thuyết minh, không chỉ nhạc nền)
-    "no_bgm": False, "max_speedup": 1.25,
+    "no_bgm": False, "max_speedup": 1.25, "tts_concurrency": 2,
     "pause_range": (0.3, 1.2), "max_advance": 0.0,
     "highlight_mode": False, "highlight_target_ratio": 0.4, "highlight_frame_interval": 6.0,
     "force": False, "verbose": False, "chrome_proc": None,
@@ -114,6 +114,7 @@ def build_cfg(*, stop_after: int | None = None) -> Config:
         scene_threshold=st.session_state.scene_threshold, chunk_target_sec=st.session_state.chunk_minutes * 60.0,
         bgm_duck_ratio=st.session_state.bgm_duck, keep_bgm=not st.session_state.no_bgm,
         max_speedup=st.session_state.max_speedup, min_pause_sec=min_pause, max_pause_sec=max_pause,
+        tts_concurrency=st.session_state.tts_concurrency,
         max_advance_sec=st.session_state.max_advance,
         # Tổ hợp link YouTube + highlight chưa được hỗ trợ (Config từ chối). Giao diện CHẶN việc chạy và báo rõ lý do;
         # ở đây chỉ đảm bảo build_cfg() không bao giờ ném lỗi làm sập cả trang (từng xảy ra ở mục đăng nhập).
@@ -269,6 +270,11 @@ with st.sidebar:
         st.session_state.interval = st.slider("Khoảng lấy mẫu (giây)", 1.0, 6.0, st.session_state.interval, 0.5)
         st.session_state.chunk_minutes = st.slider("Độ dài mỗi chunk (phút) — video dài", 1.0, 15.0, st.session_state.chunk_minutes, 0.5)
         st.session_state.max_speedup = st.slider("Tăng tốc audio tối đa", 1.0, 1.5, st.session_state.max_speedup, 0.05)
+        st.session_state.tts_concurrency = st.slider(
+            "Số kết nối Edge-TTS đồng thời", 1, 6, st.session_state.tts_concurrency, 1,
+            help="Mặc định 2. Gửi nhiều kết nối cùng lúc liên tục có thể khiến Microsoft tạm chặn, gây lỗi "
+                 "'NoAudioReceived' hàng loạt. Nếu gặp lỗi này, hạ xuống 1. Chỉ tăng lên khi mạng ổn định và "
+                 "muốn tổng hợp nhanh hơn.")
         st.session_state.max_advance = st.slider(
             "Cho phép lời đọc sớm hơn hình tối đa (giây)", 0.0, 1.0, st.session_state.max_advance, 0.05,
             help="0 = KHỚP TUYỆT ĐỐI mốc thời gian của kịch bản (khuyến nghị — lời đọc luôn đúng hình). Lớn hơn 0: "

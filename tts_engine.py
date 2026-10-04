@@ -141,6 +141,10 @@ async def synthesize_all(segments: list[ScriptSegment], cfg: Config, boundary_se
             res.raw_path = cfg.tts_dir / f"seg_{seg.id:04d}_{key}.mp3"
             if not (res.raw_path.is_file() and res.raw_path.stat().st_size > 0):   # cache theo nội dung+engine+voice
                 async with sem:
+                    if cfg.tts_stagger_sec > 0:
+                        # nghỉ NHỎ trước khi gọi Edge-TTS thật — dãn các kết nối ra theo thời gian thay vì
+                        # bắn đồng loạt ngay khi có slot trống (xem config.py: tts_stagger_sec, lý do tại sao)
+                        await asyncio.sleep(cfg.tts_stagger_sec)
                     await tts_engine.synthesize(res.text, voice, prosody, res.raw_path,
                                                 timeout=cfg.tts_timeout_sec, retries=cfg.tts_retries)
             await asyncio.to_thread(_fit_audio, res, cfg)

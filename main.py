@@ -190,10 +190,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = p.add_argument_group("TTS & âm thanh")
     g.add_argument("--max-speedup", type=float, default=1.25, help="tăng tốc audio tối đa qua FFmpeg atempo (r = actual/target)")
+    g.add_argument("--tts-concurrency", type=int, default=2,
+                   help="Số kết nối Edge-TTS đồng thời (mặc định 2). Hạ xuống 1 nếu gặp lỗi 'NoAudioReceived' "
+                   "hàng loạt (Microsoft tạm chặn do gửi quá nhiều kết nối liên tục).")
     g.add_argument("--allow-video-retime", action="store_true",
                    help="LAST-RESORT: nếu audio vẫn dài hơn cả khoảng trống sau khi tăng tốc tối đa, cho phép làm CHẬM "
                    "khung hình video trong đúng cửa sổ đó thay vì cắt cụt lời thoại (mặc định TẮT, tốn thời gian re-encode)")
-    g.add_argument("--tts-concurrency", type=int, default=4)
     g.add_argument("--bgm-duck", type=float, default=0.7, help="âm lượng BGM (0-1) khi có giọng đọc; 1 = tắt ducking")
     g.add_argument("--no-bgm", action="store_true", help="bỏ hoàn toàn âm thanh gốc")
     g.add_argument("--voice-gain", type=float, default=0.0, help="tăng/giảm âm lượng giọng đọc (dB)")
